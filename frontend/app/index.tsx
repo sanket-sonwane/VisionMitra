@@ -1,0 +1,163 @@
+import { StyleSheet, View, TouchableOpacity, Text, Image, Platform } from "react-native";
+import { useRouter } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { SafeAreaView } from "react-native-safe-area-context";
+import * as Haptics from "expo-haptics";
+import { useEffect } from "react";
+import * as Speech from "expo-speech";
+
+export default function Index() {
+  const router = useRouter();
+
+  useEffect(() => {
+    // Welcome message on load
+    Speech.speak("Welcome to VisionMitra. Your AI powered navigation assistant for safe mobility.", {
+      language: "en",
+      pitch: 1.0,
+      rate: 1.0
+    });
+  }, []);
+
+  const handlePress = (route: string, label: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    Speech.speak(label);
+    router.push(route as any);
+  };
+
+  const speak = (text: string) => {
+    Speech.speak(text, { language: "en", pitch: 1.0, rate: 0.95 });
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Ionicons name="eye" size={64} color="#2196F3" />
+        <Text style={styles.title}>VisionMitra</Text>
+        <Text style={styles.subtitle}>AI Navigation for Visually Impaired</Text>
+      </View>
+
+      <View style={styles.menuContainer}>
+        <TouchableOpacity
+          style={[styles.menuButton, styles.primaryButton]}
+          onPress={() => handlePress("/camera", "Live Navigation Camera")}
+          onLongPress={() => speak("Live Navigation Camera. Opens real-time obstacle detection.")}
+        >
+          <Ionicons name="camera" size={48} color="#fff" />
+          <Text style={styles.menuButtonText}>Live Navigation</Text>
+          <Text style={styles.menuButtonSubtext}>Camera Detection</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.menuButton, styles.secondaryButton]}
+          onPress={() => handlePress("/navigate", "Navigation")}
+          onLongPress={() => speak("Navigation. Plan route to destination.")}
+        >
+          <Ionicons name="navigate" size={48} color="#fff" />
+          <Text style={styles.menuButtonText}>Navigate</Text>
+          <Text style={styles.menuButtonSubtext}>Find Routes</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.menuButton, styles.emergencyButton]}
+          onPress={() => handlePress("/emergency", "Emergency SOS")}
+          onLongPress={() => speak("Emergency SOS. Quick access to emergency contacts.")}
+        >
+          <Ionicons name="alert-circle" size={48} color="#fff" />
+          <Text style={styles.menuButtonText}>Emergency</Text>
+          <Text style={styles.menuButtonSubtext}>SOS Contacts</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.menuButton, styles.settingsButton]}
+          onPress={() => handlePress("/settings", "Settings")}
+          onLongPress={() => speak("Settings. Configure app preferences and profile.")}
+        >
+          <Ionicons name="settings" size={48} color="#fff" />
+          <Text style={styles.menuButtonText}>Settings</Text>
+          <Text style={styles.menuButtonSubtext}>Preferences</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.footer}>
+        <Text style={styles.footerText}>Tap once to select</Text>
+        <Text style={styles.footerText}>Long press for description</Text>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#121212",
+  },
+  header: {
+    alignItems: "center",
+    paddingTop: 40,
+    paddingBottom: 20,
+  },
+  title: {
+    fontSize: 42,
+    fontWeight: "800",
+    color: "#FFFFFF",
+    marginTop: 16,
+    letterSpacing: 1,
+  },
+  subtitle: {
+    fontSize: 16,
+    color: "#B0B0B0",
+    marginTop: 8,
+    textAlign: "center",
+    paddingHorizontal: 32,
+  },
+  menuContainer: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    gap: 16,
+  },
+  menuButton: {
+    height: 120,
+    borderRadius: 16,
+    padding: 20,
+    justifyContent: "center",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  primaryButton: {
+    backgroundColor: "#2196F3",
+  },
+  secondaryButton: {
+    backgroundColor: "#4CAF50",
+  },
+  emergencyButton: {
+    backgroundColor: "#F44336",
+  },
+  settingsButton: {
+    backgroundColor: "#FF9800",
+  },
+  menuButtonText: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    marginTop: 8,
+  },
+  menuButtonSubtext: {
+    fontSize: 14,
+    color: "#E0E0E0",
+    marginTop: 4,
+  },
+  footer: {
+    padding: 20,
+    alignItems: "center",
+    gap: 4,
+  },
+  footerText: {
+    fontSize: 14,
+    color: "#808080",
+  },
+});

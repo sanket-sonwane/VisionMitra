@@ -1,0 +1,74 @@
+{
+  "expo": {
+    "name": "Eye Guide",
+    "slug": "eye-guide",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "eyeguide",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Detect obstacles for safe navigation",
+        "NSLocationWhenInUseUsageDescription": "Guide you to destinations",
+        "NSLocationAlwaysUsageDescription": "Track location for emergency",
+        "NSMicrophoneUsageDescription": "Recognize your voice commands",
+        "NSSpeechRecognitionUsageDescription": "Understand navigation requests",
+        "NSMotionUsageDescription": "Detect falls for emergency"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#000"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "RECORD_AUDIO",
+        "VIBRATE",
+        "CALL_PHONE"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#000"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Detect obstacles for safe navigation"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Guide you to destinations and track location for emergency",
+          "locationAlwaysPermission": "Track location for emergency",
+          "locationWhenInUsePermission": "Guide you to destinations",
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
