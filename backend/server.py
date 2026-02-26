@@ -12,13 +12,22 @@ from datetime import datetime
 import base64
 import asyncio
 from threading import Lock
-from robust_detection_pipeline import (
-    RobustDetectionPipeline,
-    RawDetection,
-    BoundingBox,
-    RiskLevel,
-    FailSafeManager
-)
+try:
+    from robust_detection_pipeline import (
+        RobustDetectionPipeline,
+        RawDetection,
+        BoundingBox,
+        RiskLevel,
+        FailSafeManager
+    )
+except ImportError:
+    from .robust_detection_pipeline import (
+        RobustDetectionPipeline,
+        RawDetection,
+        BoundingBox,
+        RiskLevel,
+        FailSafeManager
+    )
 
 try:
     import numpy as np
@@ -32,17 +41,11 @@ except Exception:
     cv2 = None
     CV2_AVAILABLE = False
 
-try:
-    from ultralytics import YOLO
-    ULTRALYTICS_AVAILABLE = True
-except Exception:
-    ULTRALYTICS_AVAILABLE = False
-    YOLO = None
-
-YOLO_AVAILABLE = ULTRALYTICS_AVAILABLE and CV2_AVAILABLE and np is not None
-
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+ENABLE_VISION_AI = os.environ.get('ENABLE_VISION_AI', '0').lower() in ['1', 'true', 'yes']
+YOLO_AVAILABLE = ENABLE_VISION_AI and CV2_AVAILABLE and np is not None
 
 # MongoDB connection
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
@@ -337,7 +340,12 @@ def get_yolo_model():
 
     with _yolo_lock:
         if _yolo_model is None:
-            _yolo_model = YOLO(YOLO_MODEL_PATH)
+            try:
+                from ultralytics import YOLO as UltralyticsYOLO
+                _yolo_model = UltralyticsYOLO(YOLO_MODEL_PATH)
+            except Exception as exc:
+                logger.warning(f"YOLO disabled: failed to load ultralytics model ({exc})")
+                return None
     return _yolo_model
 
 
