@@ -73,6 +73,7 @@ export default function Navigate() {
       setVoiceModuleMissing(true);
       return;
     }
+    
 
     setVoiceInputAvailable(speechRecognitionModule.isRecognitionAvailable());
 
