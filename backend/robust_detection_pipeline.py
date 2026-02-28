@@ -518,45 +518,82 @@ class AlertManager:
         return message, event
     
     def _build_critical_message(self, objects: List[TrackedObject], direction: str) -> str:
+        """Generate natural critical warning with clear action."""
         persistent = [o for o in objects if o.is_persistent]
         if not persistent:
-            return "Critical risk. Stop immediately."
+            return "Stop immediately. Critical risk detected. Do not move."
         
         primary = persistent[0].class_name
-        turn_hint = {
-            "left": "Turn left immediately.",
-            "right": "Turn right immediately.",
-            "forward": "Back up immediately.",
-            "stop": "Stop. You are blocked."
-        }.get(direction, f"Move {direction} immediately.")
         
-        return f"CRITICAL. {primary} blocking path. {turn_hint}"
+        # Check if approaching
+        is_approaching = any(o.motion_state == MotionState.APPROACHING for o in persistent)
+        
+        if direction == "stop":
+            return f"Stop immediately. {primary.capitalize()} blocking all paths. Stay still."
+        elif is_approaching:
+            turn_hint = {
+                "left": "Move left immediately",
+                "right": "Move right immediately",
+                "forward": "Back up now"
+            }.get(direction, f"Move {direction} immediately")
+            return f"Stop. {primary.capitalize()} approaching from front. {turn_hint}."
+        else:
+            turn_hint = {
+                "left": "Turn left immediately",
+                "right": "Turn right immediately", 
+                "forward": "Stop and reassess"
+            }.get(direction, f"Move {direction} now")
+            return f"Critical. {primary.capitalize()} directly ahead. {turn_hint}."
     
     def _build_danger_message(self, objects: List[TrackedObject], direction: str) -> str:
+        """Generate natural danger warning with guidance."""
         persistent = [o for o in objects if o.is_persistent]
         if not persistent:
-            return "Danger ahead. Proceed carefully."
+            return "Danger detected ahead. Move carefully."
         
-        obstacle_types = ", ".join([o.class_name for o in persistent[:2]])
-        turn_hint = {
-            "left": "Turn left carefully.",
-            "right": "Turn right carefully.",
-            "forward": "Continue forward with caution.",
-            "stop": "Stop and reassess."
-        }.get(direction, f"Move {direction} carefully.")
+        # Get primary obstacles
+        obstacle_types = [o.class_name for o in persistent[:2]]
+        obstacle_str = " and ".join(obstacle_types)
         
-        return f"Danger: {obstacle_types} ahead. {turn_hint}"
+        # Check motion
+        approaching = [o for o in persistent if o.motion_state == MotionState.APPROACHING]
+        
+        if approaching:
+            turn_hint = {
+                "left": "Move left carefully",
+                "right": "Move right carefully",
+                "forward": "Proceed slowly",
+                "stop": "Stop and wait"
+            }.get(direction, f"Move {direction} carefully")
+            return f"{obstacle_str.capitalize()} approaching from ahead. {turn_hint}."
+        else:
+            turn_hint = {
+                "left": "Turn left slowly",
+                "right": "Turn right slowly",
+                "forward": "Walk carefully forward",
+                "stop": "Stop and reassess"
+            }.get(direction, f"Move {direction} slowly")
+            return f"Danger. {obstacle_str.capitalize()} ahead. {turn_hint}."
     
     def _build_caution_message(self, objects: List[TrackedObject], direction: str) -> str:
+        """Generate natural caution message with helpful guidance."""
         persistent = [o for o in objects if o.is_persistent]
         count = len(persistent)
         
         if count == 0:
-            return "Caution. Possible obstacles detected."
+            return "Caution. Possible obstacles nearby. Proceed slowly."
         elif count == 1:
-            return f"Caution. {persistent[0].class_name} detected. Proceed slowly."
+            obj_name = persistent[0].class_name
+            distance_hint = "nearby" if persistent[0].bbox_history[-1].area > 0.05 else "ahead"
+            return f"Caution. {obj_name.capitalize()} {distance_hint}. Walk carefully."
         else:
-            return f"Caution. Multiple obstacles detected ({count}). Proceed slowly."
+            # Multiple objects
+            obj_types = list(set([o.class_name for o in persistent[:3]]))
+            if len(obj_types) == 1:
+                return f"Caution. Multiple {obj_types[0]}s detected. Move slowly."
+            else:
+                obj_str = ", ".join(obj_types[:2])
+                return f"Caution. {obj_str} and others detected. Proceed slowly."
 
 
 # ==================== ADAPTIVE DETECTION SCHEDULER ====================
@@ -583,6 +620,19 @@ class FailSafeManager:
     """
     Fail-safe logic: when uncertain, assume risk.
     Safety > silence.
+    
+    Handles all edge cases:
+    - Camera blur / Motion blur
+    - Low light / Rapid lighting change
+    - Empty frames
+    - Partial occlusion
+    - Backend overload
+    - Model load failure
+    - Corrupt image
+    - Invalid base64
+    - Network errors
+    
+    Never crashes - always provides conservative guidance.
     """
     
     @staticmethod
@@ -591,7 +641,7 @@ class FailSafeManager:
         Return conservative fallback when detection fails.
         
         Args:
-            error_type: Type of failure
+            error_type: Type of failure (image_invalid, model_unavailable, etc.)
         
         Returns:
             (audio_message, risk_level)
@@ -599,23 +649,39 @@ class FailSafeManager:
         
         fallback_responses = {
             "image_invalid": (
-                "Unable to analyze image. Obstacle detection uncertain. Move slowly.",
+                "Vision unclear. Cannot analyze image. Please move slowly and use caution.",
                 RiskLevel.CAUTION
             ),
             "model_unavailable": (
-                "Detection system offline. Proceed with caution.",
+                "Detection system offline. Proceed with extreme caution.",
                 RiskLevel.CAUTION
             ),
             "inference_timeout": (
-                "Detection taking too long. Use caution ahead.",
+                "Detection taking too long. System busy. Use extra caution ahead.",
                 RiskLevel.CAUTION
             ),
             "network_error": (
-                "Backend unavailable. Using local safety mode.",
+                "Backend connection lost. Using local safety mode. Move carefully.",
+                RiskLevel.CAUTION
+            ),
+            "camera_blur": (
+                "Camera image unclear. Vision compromised. Please move very slowly.",
+                RiskLevel.CAUTION
+            ),
+            "low_light": (
+                "Low light detected. Visibility reduced. Proceed with caution.",
+                RiskLevel.CAUTION
+            ),
+            "empty_frame": (
+                "No image received. Camera may be blocked. Stop and check surroundings.",
+                RiskLevel.DANGER
+            ),
+            "backend_overload": (
+                "System overloaded. Detection delayed. Please slow down.",
                 RiskLevel.CAUTION
             ),
             "unknown_error": (
-                "Detection system error. Stop and reassess your surroundings.",
+                "Detection system error. Stop immediately and reassess your surroundings.",
                 RiskLevel.DANGER
             )
         }
@@ -718,13 +784,15 @@ class RobustDetectionPipeline:
             )
     
     def _get_continuation_message(self, risk_level: RiskLevel) -> str:
-        """Message to repeat if no new alert"""
+        """Generate message when no new alert triggered but state persists."""
         if risk_level == RiskLevel.SAFE:
             return "Path clear. Continue forward."
         elif risk_level == RiskLevel.CAUTION:
             return "Proceed with caution."
+        elif risk_level == RiskLevel.DANGER:
+            return "Stay alert. Danger still present."
         else:
-            return "Be alert."
+            return "Critical risk. Do not move."
     
     def _build_debug_info(self, tracked_objects: List[TrackedObject], risk_level: RiskLevel) -> Dict:
         """Build debug telemetry"""
