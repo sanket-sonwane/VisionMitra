@@ -1,6 +1,6 @@
 import { StyleSheet, View, TouchableOpacity, Text, Alert, Platform } from "react-native";
 import { CameraView, useCameraPermissions, CameraType } from "expo-camera";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
@@ -18,7 +18,8 @@ import {
 } from "@/utils/journeyPlanner";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-const SEGMENT_COMPLETION_THRESHOLD = 50; // meters - consider segment complete when within this distance
+const SEGMENT_COMPLETION_THRESHOLD = 50; // meters
+const MIN_CAPTURE_INTERVAL_MS = 300; // fastest we'll capture (prevents CPU overload)
 
 export default function Camera() {
   const router = useRouter();
@@ -30,8 +31,14 @@ export default function Camera() {
   const [currentLocation, setCurrentLocation] = useState<Coordinates | null>(null);
   const [currentSegment, setCurrentSegment] = useState<NavigationSegment | null>(null);
   const [segmentProgress, setSegmentProgress] = useState<number>(0);
+  const [fps, setFps] = useState<number>(0);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const cameraRef = useRef<any>(null);
-  const analysisInterval = useRef<any>(null);
+  const streamingRef = useRef<boolean>(false); // controls streaming loop
+  const lastWarningRef = useRef<string>(""); // dedup speech
+  const lastAudioMsgRef = useRef<string>(""); // dedup speech content
+  const frameCountRef = useRef<number>(0);
+  const fpsTimerRef = useRef<any>(null);
   const locationInterval = useRef<any>(null);
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
@@ -40,8 +47,9 @@ export default function Camera() {
     initializeNavigation();
     
     return () => {
-      if (analysisInterval.current) {
-        clearInterval(analysisInterval.current);
+      streamingRef.current = false;
+      if (fpsTimerRef.current) {
+        clearInterval(fpsTimerRef.current);
       }
       if (locationInterval.current) {
         clearInterval(locationInterval.current);
@@ -59,11 +67,13 @@ export default function Camera() {
 
   const initializeNavigation = () => {
     if (currentSession?.journey_plan) {
-      Speech.speak("Segmented navigation active. Starting first segment.");
+      Speech.speak("Segmented navigation active. Starting live detection.");
       updateCurrentSegment();
       startLocationTracking();
+      // Auto-start live streaming when navigating
+      setTimeout(() => startContinuousAnalysis(), 1500);
     } else {
-      Speech.speak("Camera mode. Tap analyze button to detect obstacles.");
+      Speech.speak("Camera mode. Tap start to begin live detection.");
     }
   };
 
@@ -192,6 +202,116 @@ export default function Camera() {
     setLocationPermission(status === "granted");
   };
 
+  // Provide haptic + spoken feedback, with dedup to avoid repeating the same message
+  const handleDetectionFeedback = useCallback((result: any, forceSpeak: boolean = false) => {
+    // Haptic feedback on every frame based on warning level
+    if (result.warning_level === "critical" || result.warning_level === "danger") {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } else if (result.warning_level === "caution") {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    }
+    // No haptic for "safe" during streaming to avoid buzz fatigue
+
+    // Only speak when warning level changes or message content changes (dedup in live mode)
+    const warningChanged = result.warning_level !== lastWarningRef.current;
+    const messageChanged = result.audio_message !== lastAudioMsgRef.current;
+
+    if (forceSpeak || warningChanged || messageChanged) {
+      lastWarningRef.current = result.warning_level;
+      lastAudioMsgRef.current = result.audio_message;
+
+      // Stop any in-progress speech so new one starts immediately
+      Speech.stop();
+      Speech.speak(result.audio_message, {
+        language: "en",
+        pitch: 1.0,
+        rate: 1.0, // slightly faster for live mode
+      });
+    }
+  }, []);
+
+  // Continuous live-streaming loop: capture -> send -> repeat immediately
+  const streamLoop = useCallback(async () => {
+    while (streamingRef.current) {
+      const frameStart = Date.now();
+
+      try {
+        if (!cameraRef.current) {
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+
+        // Capture frame at low quality for speed
+        const photo = await cameraRef.current.takePictureAsync({
+          quality: 0.2,
+          base64: true,
+        });
+
+        if (!photo?.base64 || !streamingRef.current) continue;
+        console.log(`[Stream] Frame captured: ${photo.width}x${photo.height}, base64 len=${photo.base64.length}`);
+
+        // Get location (cached, non-blocking)
+        let location = null;
+        if (locationPermission) {
+          try {
+            const loc = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Low, // fast GPS for streaming
+            });
+            location = {
+              latitude: loc.coords.latitude,
+              longitude: loc.coords.longitude,
+            };
+          } catch { /* skip location this frame */ }
+        }
+
+        if (!streamingRef.current) break;
+
+        if (isOnlineMode) {
+          const response = await axios.post(`${BACKEND_URL}/api/detect-obstacles`, {
+            image_base64: photo.base64,
+            user_id: userId || "demo_user",
+            session_id: currentSession?.id,
+            latitude: location?.latitude,
+            longitude: location?.longitude,
+          }, {
+            timeout: 8000
+          });
+
+          if (!streamingRef.current) break;
+
+          const result = response.data;
+          setLastAnalysis(result);
+          setStreamError(null); // clear any previous error
+          setIsAnalyzing(false); // show we just got a result
+          handleDetectionFeedback(result);
+        } else {
+          setLastAnalysis({
+            warning_level: "caution",
+            audio_message: "Offline mode active. Limited obstacle detection."
+          });
+        }
+
+        frameCountRef.current += 1;
+
+      } catch (error: any) {
+        // Show error to user for debugging
+        const errMsg = error?.message || String(error);
+        console.warn("Stream frame error:", errMsg);
+        setStreamError(errMsg);
+        // Brief backoff on error to avoid hammering a down server
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      // Enforce minimum capture interval to prevent overheating/CPU overload
+      const elapsed = Date.now() - frameStart;
+      if (elapsed < MIN_CAPTURE_INTERVAL_MS) {
+        await new Promise(r => setTimeout(r, MIN_CAPTURE_INTERVAL_MS - elapsed));
+      }
+    }
+
+    setIsAnalyzing(false);
+  }, [isOnlineMode, locationPermission, userId, currentSession, handleDetectionFeedback]);
+
   if (!permission) {
     return (
       <SafeAreaView style={styles.container}>
@@ -216,6 +336,7 @@ export default function Camera() {
     );
   }
 
+  // Single frame capture for manual "Analyze Now" button
   const captureAndAnalyze = async () => {
     if (!cameraRef.current || isAnalyzing) return;
 
@@ -224,17 +345,16 @@ export default function Camera() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       Speech.speak("Analyzing surroundings...");
 
-      // Capture photo
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5,
+        quality: 0.2,
         base64: true,
       });
 
       if (!photo.base64) {
         throw new Error("Failed to capture image");
       }
+      console.log(`[CaptureOnce] Photo captured: ${photo.width}x${photo.height}, base64 len=${photo.base64.length}`);
 
-      // Get location
       let location = null;
       if (locationPermission) {
         const loc = await Location.getCurrentPositionAsync({});
@@ -244,7 +364,6 @@ export default function Camera() {
         };
       }
 
-      // Send to backend for analysis (only if online mode)
       if (isOnlineMode) {
         const response = await axios.post(`${BACKEND_URL}/api/detect-obstacles`, {
           image_base64: photo.base64,
@@ -258,24 +377,8 @@ export default function Camera() {
 
         const result = response.data;
         setLastAnalysis(result);
-
-        // Haptic feedback based on warning level
-        if (result.warning_level === "critical" || result.warning_level === "danger") {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        } else if (result.warning_level === "caution") {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-        } else {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        }
-
-        // Speak the audio message
-        Speech.speak(result.audio_message, {
-          language: "en",
-          pitch: 1.0,
-          rate: 0.9,
-        });
+        handleDetectionFeedback(result, true);
       } else {
-        // Offline mode - basic analysis
         Speech.speak("Offline mode. Using basic detection. Please proceed with caution.");
         setLastAnalysis({
           warning_level: "caution",
@@ -293,24 +396,37 @@ export default function Camera() {
   };
 
   const startContinuousAnalysis = () => {
+    if (streamingRef.current) return; // already running
+    streamingRef.current = true;
     setIsActive(true);
-    Speech.speak("Continuous monitoring started");
+    setIsAnalyzing(true);
+    setStreamError(null);
+    frameCountRef.current = 0;
+    Speech.speak("Live detection started");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
-    analysisInterval.current = setInterval(() => {
-      captureAndAnalyze();
-    }, 3000); // Analyze every 3 seconds
+    // FPS counter: update every second
+    fpsTimerRef.current = setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
+
+    // Launch the streaming loop (runs async, controlled by streamingRef)
+    streamLoop();
   };
 
   const stopContinuousAnalysis = () => {
+    streamingRef.current = false;
     setIsActive(false);
-    Speech.speak("Continuous monitoring stopped");
+    setIsAnalyzing(false);
+    Speech.speak("Live detection stopped");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     
-    if (analysisInterval.current) {
-      clearInterval(analysisInterval.current);
-      analysisInterval.current = null;
+    if (fpsTimerRef.current) {
+      clearInterval(fpsTimerRef.current);
+      fpsTimerRef.current = null;
     }
+    setFps(0);
   };
 
   const getWarningColor = (level: string) => {
@@ -350,6 +466,23 @@ export default function Camera() {
           facing="back"
         />
 
+        {/* Live streaming indicator */}
+        {isActive && (
+          <View style={styles.liveIndicator}>
+            <View style={styles.liveDot} />
+            <Text style={styles.liveText}>LIVE</Text>
+            <Text style={styles.fpsText}>{fps} fps</Text>
+          </View>
+        )}
+
+        {/* Stream error indicator */}
+        {streamError && (
+          <View style={styles.errorBanner}>
+            <Ionicons name="warning" size={16} color="#fff" />
+            <Text style={styles.errorText} numberOfLines={2}>{streamError}</Text>
+          </View>
+        )}
+
         {currentSegment && (
           <View style={styles.segmentOverlay}>
             <View style={[
@@ -378,9 +511,38 @@ export default function Camera() {
         {lastAnalysis && (
           <View style={[styles.statusOverlay, { backgroundColor: getWarningColor(lastAnalysis.warning_level) + "CC" }]}>
             <Text style={styles.statusText}>{lastAnalysis.warning_level?.toUpperCase()}</Text>
-            {lastAnalysis.obstacles && lastAnalysis.obstacles.length > 0 && (
+
+            {/* Scene context info */}
+            {lastAnalysis.scene_type && (
+              <Text style={styles.sceneText}>
+                {lastAnalysis.scene_type?.replace(/_/g, " ").toUpperCase()}
+                {lastAnalysis.ground_type && lastAnalysis.ground_type !== "unknown" ? ` • ${lastAnalysis.ground_type}` : ""}
+              </Text>
+            )}
+
+            {/* Wall warning */}
+            {lastAnalysis.wall_ahead && (
+              <Text style={styles.wallWarning}>
+                ⚠ WALL {lastAnalysis.wall_distance?.toUpperCase() || "AHEAD"}
+              </Text>
+            )}
+
+            {/* Path status */}
+            {lastAnalysis.path_status && lastAnalysis.path_status !== "clear" && (
+              <Text style={styles.pathStatus}>
+                Path: {lastAnalysis.path_status?.replace(/_/g, " ")}
+              </Text>
+            )}
+
+            {lastAnalysis.obstacles && lastAnalysis.obstacles.length > 0 ? (
               <Text style={styles.obstacleCount}>
                 {lastAnalysis.obstacles.length} Obstacle{lastAnalysis.obstacles.length > 1 ? "s" : ""}
+                {lastAnalysis.obstacles.map((o: any) => ` • ${o.type} ${o.distance}`).join("")}
+              </Text>
+            ) : lastAnalysis.detection_count != null && (
+              <Text style={styles.obstacleCount}>
+                {lastAnalysis.detection_count} detections
+                {lastAnalysis.frame_size ? ` • ${lastAnalysis.frame_size}` : ""}
               </Text>
             )}
           </View>
@@ -394,39 +556,45 @@ export default function Camera() {
               style={[styles.analyzeButton, isAnalyzing && styles.analyzeButtonDisabled]}
               onPress={captureAndAnalyze}
               disabled={isAnalyzing}
-              onLongPress={() => Speech.speak("Analyze once. Takes a photo and analyzes obstacles.")}
+              onLongPress={() => Speech.speak("Analyze once. Takes a single photo and checks for obstacles.")}
             >
               <Ionicons name="scan" size={32} color="#fff" />
               <Text style={styles.buttonText}>
-                {isAnalyzing ? "Analyzing..." : "Analyze Now"}
+                {isAnalyzing ? "Analyzing..." : "Analyze Once"}
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.continuousButton}
               onPress={startContinuousAnalysis}
-              onLongPress={() => Speech.speak("Start continuous monitoring. Analyzes every 3 seconds.")}
+              onLongPress={() => Speech.speak("Start live detection. Streams camera continuously.")}
             >
-              <Ionicons name="play" size={32} color="#fff" />
-              <Text style={styles.buttonText}>Start Monitoring</Text>
+              <Ionicons name="videocam" size={32} color="#fff" />
+              <Text style={styles.buttonText}>Start Live Detection</Text>
             </TouchableOpacity>
           </>
         ) : (
           <TouchableOpacity
             style={styles.stopButton}
             onPress={stopContinuousAnalysis}
-            onLongPress={() => Speech.speak("Stop continuous monitoring")}
+            onLongPress={() => Speech.speak("Stop live detection")}
           >
             <Ionicons name="stop" size={32} color="#fff" />
-            <Text style={styles.buttonText}>Stop Monitoring</Text>
+            <Text style={styles.buttonText}>Stop Live Detection</Text>
           </TouchableOpacity>
         )}
       </View>
 
       {lastAnalysis && (
         <View style={styles.resultContainer}>
-          <Text style={styles.resultTitle}>Last Analysis:</Text>
+          <Text style={styles.resultTitle}>Navigation Audio:</Text>
           <Text style={styles.resultMessage}>{lastAnalysis.audio_message}</Text>
+          {lastAnalysis.scene_description && (
+            <Text style={styles.sceneDescription}>{lastAnalysis.scene_description}</Text>
+          )}
+          {lastAnalysis.navigation_guidance && lastAnalysis.navigation_guidance !== lastAnalysis.audio_message && (
+            <Text style={styles.navGuidance}>{lastAnalysis.navigation_guidance}</Text>
+          )}
         </View>
       )}
     </SafeAreaView>
@@ -475,7 +643,7 @@ const styles = StyleSheet.create({
   },
   statusOverlay: {
     position: "absolute",
-    top: 20,
+    top: 50,
     left: 20,
     right: 20,
     padding: 16,
@@ -495,6 +663,52 @@ const styles = StyleSheet.create({
   controls: {
     padding: 20,
     gap: 12,
+  },
+  liveIndicator: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.6)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 6,
+  },
+  liveDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#F44336",
+  },
+  liveText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#F44336",
+  },
+  fpsText: {
+    fontSize: 11,
+    color: "#aaa",
+    marginLeft: 4,
+  },
+  errorBanner: {
+    position: "absolute",
+    top: 40,
+    left: 12,
+    right: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(244,67,54,0.85)",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+    gap: 6,
+  },
+  errorText: {
+    fontSize: 11,
+    color: "#fff",
+    flex: 1,
   },
   analyzeButton: {
     backgroundColor: "#2196F3",
@@ -546,6 +760,35 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: "#fff",
     lineHeight: 24,
+  },
+  sceneDescription: {
+    fontSize: 13,
+    color: "#81D4FA",
+    marginTop: 6,
+    fontStyle: "italic",
+  },
+  navGuidance: {
+    fontSize: 13,
+    color: "#A5D6A7",
+    marginTop: 4,
+  },
+  sceneText: {
+    fontSize: 11,
+    color: "#E0E0E0",
+    fontWeight: "600",
+    marginTop: 2,
+    letterSpacing: 0.5,
+  },
+  wallWarning: {
+    fontSize: 13,
+    color: "#FFCDD2",
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  pathStatus: {
+    fontSize: 11,
+    color: "#FFE0B2",
+    marginTop: 1,
   },
   segmentOverlay: {
     position: "absolute",
