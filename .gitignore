@@ -51,6 +51,17 @@ __pycache__/
 *pyc*
 venv/
 .venv/
+.venv-*/
+
+# Model weights and binaries
+*.pt
+*.exe
+*.bin
+*.onnx
+
+# Test artifacts
+backend/test_bus.jpg
+backend/test_*.jpg
 
 # Development tools
 chainlit.md
