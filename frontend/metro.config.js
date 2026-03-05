@@ -5,6 +5,9 @@ const { FileStore } = require('metro-cache');
 
 const config = getDefaultConfig(__dirname);
 
+// Include .ppn (Picovoice Porcupine keyword) files as bundled assets
+config.resolver.assetExts = [...(config.resolver.assetExts ?? []), 'ppn'];
+
 // Use a stable on-disk store (shared across web/android)
 const root = process.env.METRO_CACHE_ROOT || path.join(__dirname, '.metro-cache');
 config.cacheStores = [

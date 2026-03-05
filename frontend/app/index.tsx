@@ -5,9 +5,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useEffect } from "react";
 import * as Speech from "expo-speech";
+import { useVoiceContext } from "@/voice/VoiceEngineProvider";
 
 export default function Index() {
   const router = useRouter();
+  const { state: voiceState } = useVoiceContext();
 
   useEffect(() => {
     // Welcome message on load
@@ -76,6 +78,26 @@ export default function Index() {
           <Text style={styles.menuButtonText}>Settings</Text>
           <Text style={styles.menuButtonSubtext}>Preferences</Text>
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.voiceStatus}>
+        <Ionicons
+          name={voiceState.isWakeWordActive ? 'mic' : 'mic-off'}
+          size={18}
+          color={voiceState.isWakeWordActive ? '#4CAF50' : '#808080'}
+        />
+        <Text style={[
+          styles.voiceStatusText,
+          voiceState.isWakeWordActive && styles.voiceStatusActive,
+        ]}>
+          {voiceState.state === 'wake_listening'
+            ? 'Say "visionmitra"'
+            : voiceState.state === 'command_listening'
+            ? 'Listening for command...'
+            : voiceState.state === 'processing'
+            ? 'Processing...'
+            : 'Voice idle'}
+        </Text>
       </View>
 
       <View style={styles.footer}>
@@ -159,5 +181,19 @@ const styles = StyleSheet.create({
   footerText: {
     fontSize: 14,
     color: "#808080",
+  },
+  voiceStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
+  voiceStatusText: {
+    fontSize: 14,
+    color: '#808080',
+  },
+  voiceStatusActive: {
+    color: '#4CAF50',
   },
 });
