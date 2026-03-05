@@ -47,10 +47,15 @@ load_dotenv(ROOT_DIR / '.env')
 ENABLE_VISION_AI = os.environ.get('ENABLE_VISION_AI', '0').lower() in ['1', 'true', 'yes']
 YOLO_AVAILABLE = ENABLE_VISION_AI and CV2_AVAILABLE and np is not None
 
-# MongoDB connection
+# MongoDB connection (lazy - don't block startup on DNS failures)
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ.get('DB_NAME', 'test_database')]
+try:
+    client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+    db = client[os.environ.get('DB_NAME', 'test_database')]
+except Exception as _mongo_err:
+    logging.warning(f"MongoDB connection failed ({_mongo_err}), falling back to localhost")
+    client = AsyncIOMotorClient('mongodb://localhost:27017', serverSelectionTimeoutMS=5000)
+    db = client[os.environ.get('DB_NAME', 'test_database')]
 
 YOLO_MODEL_PATH = os.environ.get('YOLO_MODEL_PATH', 'yolov8n.pt')
 YOLO_CONF_THRESHOLD = float(os.environ.get('YOLO_CONF_THRESHOLD', '0.35'))
@@ -208,10 +213,6 @@ class EmergencyAlertCreate(BaseModel):
     contacts_attempted: Optional[List[str]] = []
     contacts_notified: Optional[List[str]] = []
     notify_errors: Optional[List[str]] = []
-    sms_mode_used: Optional[str] = "composer"
-    contacts_attempted: Optional[List[str]] = []
-    contacts_notified: Optional[List[str]] = []
-    notify_errors: Optional[List[str]] = []
 
 # ==================== USER ROUTES ====================
 
@@ -219,52 +220,125 @@ class EmergencyAlertCreate(BaseModel):
 async def create_user(user: UserCreate):
     user_dict = user.model_dump()
     user_obj = User(**user_dict)
-    await db.users.insert_one(user_obj.model_dump())
+    try:
+        await asyncio.wait_for(db.users.insert_one(user_obj.model_dump()), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for user: {e}")
     return user_obj
 
 @api_router.get("/users/{user_id}", response_model=User)
 async def get_user(user_id: str):
-    user = await db.users.find_one({"id": user_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return User(**user)
+    try:
+        user = await asyncio.wait_for(db.users.find_one({"id": user_id}), timeout=3.0)
+        if user:
+            return User(**user)
+    except Exception as e:
+        logger.warning(f"MongoDB read failed for user: {e}")
+    raise HTTPException(status_code=404, detail="User not found")
 
 # ==================== EMERGENCY CONTACT ROUTES ====================
+
+# In-memory fallback when MongoDB is unavailable
+_contacts_cache: Dict[str, List[dict]] = {}  # user_id -> [contact_dict]
+
+def _cache_add_contact(contact_data: dict):
+    uid = contact_data["user_id"]
+    if uid not in _contacts_cache:
+        _contacts_cache[uid] = []
+    _contacts_cache[uid].append(contact_data)
+
+def _cache_get_contacts(user_id: str) -> List[dict]:
+    return sorted(_contacts_cache.get(user_id, []), key=lambda c: c.get("priority", 999))
+
+def _cache_delete_contact(contact_id: str) -> bool:
+    for uid, contacts in _contacts_cache.items():
+        for i, c in enumerate(contacts):
+            if c.get("id") == contact_id:
+                contacts.pop(i)
+                return True
+    return False
 
 @api_router.post("/emergency-contacts", response_model=EmergencyContact)
 async def create_emergency_contact(contact: EmergencyContactCreate):
     contact_dict = contact.model_dump()
     contact_obj = EmergencyContact(**contact_dict)
-    await db.emergency_contacts.insert_one(contact_obj.model_dump())
+    contact_data = contact_obj.model_dump()
+    # Always store in memory
+    _cache_add_contact(contact_data)
+    # Try MongoDB with timeout
+    try:
+        await asyncio.wait_for(db.emergency_contacts.insert_one(contact_data), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for contact, using in-memory: {e}")
     return contact_obj
 
 @api_router.get("/emergency-contacts/{user_id}", response_model=List[EmergencyContact])
 async def get_emergency_contacts(user_id: str):
-    contacts = await db.emergency_contacts.find({"user_id": user_id}).sort("priority", 1).to_list(100)
-    return [EmergencyContact(**contact) for contact in contacts]
+    # Try memory first, then MongoDB
+    cached = _cache_get_contacts(user_id)
+    if cached:
+        return [EmergencyContact(**c) for c in cached]
+    try:
+        contacts = await asyncio.wait_for(
+            db.emergency_contacts.find({"user_id": user_id}).sort("priority", 1).to_list(100),
+            timeout=3.0
+        )
+        if contacts:
+            # Populate cache from DB
+            for c in contacts:
+                _cache_add_contact(c)
+            return [EmergencyContact(**contact) for contact in contacts]
+    except Exception as e:
+        logger.warning(f"MongoDB read failed for contacts: {e}")
+    return []
 
 @api_router.delete("/emergency-contacts/{contact_id}")
 async def delete_emergency_contact(contact_id: str):
-    result = await db.emergency_contacts.delete_one({"id": contact_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Contact not found")
+    # Always remove from memory
+    found_in_cache = _cache_delete_contact(contact_id)
+    # Try MongoDB
+    try:
+        result = await asyncio.wait_for(db.emergency_contacts.delete_one({"id": contact_id}), timeout=3.0)
+        if result.deleted_count == 0 and not found_in_cache:
+            raise HTTPException(status_code=404, detail="Contact not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"MongoDB delete failed for contact: {e}")
+        if not found_in_cache:
+            raise HTTPException(status_code=404, detail="Contact not found")
     return {"message": "Contact deleted successfully"}
 
 # ==================== NAVIGATION SESSION ROUTES ====================
+
+# In-memory fallback when MongoDB is unavailable
+_nav_sessions_cache: Dict[str, dict] = {}
 
 @api_router.post("/navigation-sessions", response_model=NavigationSession)
 async def create_navigation_session(session: NavigationSessionCreate):
     session_dict = session.model_dump()
     session_obj = NavigationSession(**session_dict)
-    await db.navigation_sessions.insert_one(session_obj.model_dump())
+    session_data = session_obj.model_dump()
+    try:
+        await asyncio.wait_for(db.navigation_sessions.insert_one(session_data), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for nav session, using in-memory: {e}")
+    # Always store in memory so navigation works regardless of DB
+    _nav_sessions_cache[session_obj.id] = session_data
     return session_obj
 
 @api_router.get("/navigation-sessions/{session_id}", response_model=NavigationSession)
 async def get_navigation_session(session_id: str):
-    session = await db.navigation_sessions.find_one({"id": session_id})
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return NavigationSession(**session)
+    # Check in-memory cache first
+    if session_id in _nav_sessions_cache:
+        return NavigationSession(**_nav_sessions_cache[session_id])
+    try:
+        session = await asyncio.wait_for(db.navigation_sessions.find_one({"id": session_id}), timeout=3.0)
+        if session:
+            return NavigationSession(**session)
+    except Exception as e:
+        logger.warning(f"MongoDB read failed for nav session: {e}")
+    raise HTTPException(status_code=404, detail="Session not found")
 
 @api_router.patch("/navigation-sessions/{session_id}")
 async def update_navigation_session(session_id: str, status: str = None, current_segment_index: int = None):
@@ -273,7 +347,7 @@ async def update_navigation_session(session_id: str, status: str = None, current
     if status is not None:
         update_data["status"] = status
         if status in ["completed", "cancelled"]:
-            update_data["completed_at"] = datetime.utcnow()
+            update_data["completed_at"] = datetime.utcnow().isoformat()
     
     if current_segment_index is not None:
         update_data["current_segment_index"] = current_segment_index
@@ -281,20 +355,42 @@ async def update_navigation_session(session_id: str, status: str = None, current
     if not update_data:
         raise HTTPException(status_code=400, detail="No update data provided")
     
-    result = await db.navigation_sessions.update_one(
-        {"id": session_id},
-        {"$set": update_data}
-    )
-    if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # Update in-memory cache
+    if session_id in _nav_sessions_cache:
+        _nav_sessions_cache[session_id].update(update_data)
+    
+    # Try MongoDB (non-blocking)
+    try:
+        await asyncio.wait_for(
+            db.navigation_sessions.update_one({"id": session_id}, {"$set": update_data}),
+            timeout=3.0
+        )
+    except Exception as e:
+        logger.warning(f"MongoDB update failed for nav session: {e}")
+    
     return {"message": "Session updated successfully", "updated_fields": update_data}
 
 @api_router.get("/navigation-sessions/user/{user_id}", response_model=List[NavigationSession])
 async def get_user_navigation_sessions(user_id: str, limit: int = 20):
-    sessions = await db.navigation_sessions.find(
-        {"user_id": user_id}
-    ).sort("started_at", -1).limit(limit).to_list(limit)
-    return [NavigationSession(**session) for session in sessions]
+    # Combine in-memory and DB results
+    sessions = []
+    cached_ids = set()
+    for sid, sdata in _nav_sessions_cache.items():
+        if sdata.get("user_id") == user_id:
+            sessions.append(NavigationSession(**sdata))
+            cached_ids.add(sid)
+    try:
+        db_sessions = await asyncio.wait_for(
+            db.navigation_sessions.find({"user_id": user_id}).sort("started_at", -1).limit(limit).to_list(limit),
+            timeout=3.0
+        )
+        for s in db_sessions:
+            if s.get("id") not in cached_ids:
+                sessions.append(NavigationSession(**s))
+    except Exception as e:
+        logger.warning(f"MongoDB read failed for user sessions: {e}")
+    sessions.sort(key=lambda x: x.started_at, reverse=True)
+    return sessions[:limit]
 
 # ==================== LOCATION LOG ROUTES ====================
 
@@ -302,14 +398,20 @@ async def get_user_navigation_sessions(user_id: str, limit: int = 20):
 async def create_location_log(log: LocationLogCreate):
     log_dict = log.model_dump()
     log_obj = LocationLog(**log_dict)
-    await db.location_logs.insert_one(log_obj.model_dump())
+    try:
+        await asyncio.wait_for(db.location_logs.insert_one(log_obj.model_dump()), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for location log: {e}")
     return log_obj
 
 @api_router.post("/location-logs/batch")
 async def create_location_logs_batch(logs: List[LocationLogCreate]):
     log_objects = [LocationLog(**log.model_dump()) for log in logs]
     log_dicts = [log.model_dump() for log in log_objects]
-    await db.location_logs.insert_many(log_dicts)
+    try:
+        await asyncio.wait_for(db.location_logs.insert_many(log_dicts), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB batch write failed for location logs: {e}")
     return {"message": f"Created {len(log_objects)} location logs"}
 
 # ==================== ALERT HISTORY ROUTES ====================
@@ -318,15 +420,23 @@ async def create_location_logs_batch(logs: List[LocationLogCreate]):
 async def create_alert(alert: AlertHistoryCreate):
     alert_dict = alert.model_dump()
     alert_obj = AlertHistory(**alert_dict)
-    await db.alert_history.insert_one(alert_obj.model_dump())
+    try:
+        await asyncio.wait_for(db.alert_history.insert_one(alert_obj.model_dump()), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for alert: {e}")
     return alert_obj
 
 @api_router.get("/alerts/user/{user_id}", response_model=List[AlertHistory])
 async def get_user_alerts(user_id: str, limit: int = 50):
-    alerts = await db.alert_history.find(
-        {"user_id": user_id}
-    ).sort("timestamp", -1).limit(limit).to_list(limit)
-    return [AlertHistory(**alert) for alert in alerts]
+    try:
+        alerts = await asyncio.wait_for(
+            db.alert_history.find({"user_id": user_id}).sort("timestamp", -1).limit(limit).to_list(limit),
+            timeout=3.0
+        )
+        return [AlertHistory(**alert) for alert in alerts]
+    except Exception as e:
+        logger.warning(f"MongoDB read failed for alerts: {e}")
+        return []
 
 # ==================== AI VISION OBSTACLE DETECTION ====================
 
@@ -354,6 +464,101 @@ def decode_base64_image(image_base64: str):
     image_bytes = base64.b64decode(image_str)
     np_arr = np.frombuffer(image_bytes, dtype=np.uint8)
     return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+
+# ==================== PROXIMITY / WALL DETECTION ====================
+
+def analyze_scene_proximity(frame) -> dict:
+    """
+    Detect large uniform surfaces (walls, doors, pillars) via image analysis.
+    YOLO cannot detect featureless surfaces — this fills that gap.
+    
+    Returns dict with:
+      - is_obstructed: bool  (camera likely facing a large surface)
+      - obstruction_confidence: float 0-1
+      - reason: str
+    """
+    if frame is None or not CV2_AVAILABLE:
+        return {"is_obstructed": False, "obstruction_confidence": 0.0, "reason": "no_frame"}
+    
+    h, w = frame.shape[:2]
+    result = {"is_obstructed": False, "obstruction_confidence": 0.0, "reason": "clear"}
+    
+    scores = []
+    
+    # --- 1. Edge density: walls/flat surfaces have very few edges ---
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = float(np.count_nonzero(edges)) / (h * w)
+    # Very low edge density → likely facing a flat surface
+    if edge_density < 0.02:
+        scores.append(0.7)
+    elif edge_density < 0.04:
+        scores.append(0.4)
+    else:
+        scores.append(0.0)
+    
+    # --- 2. Color uniformity in center region ---
+    # A wall close-up will be very uniform in the center 60% of the frame
+    cy1, cy2 = int(h * 0.2), int(h * 0.8)
+    cx1, cx2 = int(w * 0.2), int(w * 0.8)
+    center_region = frame[cy1:cy2, cx1:cx2]
+    
+    # Standard deviation of pixel values (low = uniform)
+    std_dev = float(np.std(center_region))
+    if std_dev < 15:
+        scores.append(0.8)   # Very uniform — almost certainly a wall/surface
+    elif std_dev < 25:
+        scores.append(0.5)
+    elif std_dev < 40:
+        scores.append(0.2)
+    else:
+        scores.append(0.0)
+    
+    # --- 3. Laplacian variance (blur detection) ---
+    # An object very close to the camera will be blurry
+    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    if laplacian_var < 50:
+        scores.append(0.7)   # Very blurry — something very close
+    elif laplacian_var < 150:
+        scores.append(0.3)
+    else:
+        scores.append(0.0)
+    
+    # --- 4. Dominant color coverage ---
+    # If one color covers >60% of pixels, likely a wall
+    small = cv2.resize(center_region, (50, 50))
+    pixels = small.reshape(-1, 3)
+    # Quantize to reduce color space
+    quantized = (pixels // 32) * 32
+    unique, counts = np.unique(quantized, axis=0, return_counts=True)
+    max_coverage = float(counts.max()) / len(pixels)
+    if max_coverage > 0.6:
+        scores.append(0.7)
+    elif max_coverage > 0.4:
+        scores.append(0.3)
+    else:
+        scores.append(0.0)
+    
+    # --- Aggregate score ---
+    avg_score = sum(scores) / len(scores) if scores else 0.0
+    
+    if avg_score >= 0.45:
+        result["is_obstructed"] = True
+        result["obstruction_confidence"] = round(avg_score, 3)
+        if edge_density < 0.02 and std_dev < 20:
+            result["reason"] = "wall_or_flat_surface"
+        elif laplacian_var < 50:
+            result["reason"] = "very_close_object"
+        else:
+            result["reason"] = "large_uniform_surface"
+    
+    logger.debug(
+        f"Proximity analysis: edge_density={edge_density:.4f}, std_dev={std_dev:.1f}, "
+        f"laplacian={laplacian_var:.1f}, color_coverage={max_coverage:.2f}, score={avg_score:.3f}"
+    )
+    
+    return result
 
 
 def direction_from_x_center(x_center: float, frame_width: int) -> str:
@@ -420,7 +625,12 @@ async def run_blocking(func, *args, **kwargs):
 
 MOBILITY_RELEVANT_CLASSES = {
     "person", "bicycle", "car", "motorcycle", "bus", "truck", "train",
-    "traffic light", "stop sign", "bench", "dog", "cat", "chair", "potted plant"
+    "traffic light", "stop sign", "bench", "dog", "cat", "chair", "potted plant",
+    # Additional indoor/outdoor obstacles
+    "couch", "bed", "dining table", "toilet", "tv", "laptop", "refrigerator",
+    "oven", "sink", "microwave", "toaster", "fire hydrant", "parking meter",
+    "backpack", "umbrella", "handbag", "suitcase", "sports ball", "skateboard",
+    "surfboard", "bottle", "cup", "vase", "scissors", "book", "clock",
 }
 
 @api_router.post("/detect-obstacles", response_model=ObstacleDetectionResponse)
@@ -457,6 +667,18 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 audio_message=message
             )
 
+        # Resize frame for faster inference (cap at 480px)
+        orig_h, orig_w = frame.shape[:2]
+        MAX_DIM = 480
+        if max(orig_h, orig_w) > MAX_DIM:
+            scale = MAX_DIM / max(orig_h, orig_w)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            inference_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            logger.debug(f"Resized {orig_w}x{orig_h} -> {new_w}x{new_h} for inference")
+        else:
+            inference_frame = frame
+
         # Load YOLO model
         model = get_yolo_model()
         if model is None:
@@ -473,11 +695,12 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
             yolo_results = await asyncio.wait_for(
                 run_blocking(
                     model.predict,
-                    frame,
+                    inference_frame,
                     conf=YOLO_CONF_THRESHOLD,
-                    verbose=False
+                    verbose=False,
+                    imgsz=320
                 ),
-                timeout=5.0  # 5 second timeout
+                timeout=8.0  # 8 second timeout
             )
         except asyncio.TimeoutError:
             message, risk = FailSafeManager.get_fallback_response("inference_timeout")
@@ -491,7 +714,8 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
         # Parse YOLO results
         result_obj = yolo_results[0]
         class_names = result_obj.names
-        frame_height, frame_width = frame.shape[:2]
+        # Use inference_frame dimensions (YOLO box coords are relative to this)
+        frame_height, frame_width = inference_frame.shape[:2]
         frame_area = float(frame_width * frame_height)
 
         # Convert YOLO detections to RawDetection objects
@@ -524,6 +748,35 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                     frame_height=frame_height
                 ))
 
+        # ---- PROXIMITY / WALL DETECTION (fills YOLO blind spot) ----
+        # When YOLO finds nothing or very little, analyze the raw image
+        # to detect walls, flat surfaces, and very close objects.
+        proximity_result = analyze_scene_proximity(frame)
+        if proximity_result["is_obstructed"] and len(raw_detections) <= 1:
+            # Inject a synthetic "wall/surface" detection so the pipeline
+            # treats it as a real obstacle.
+            synthetic_confidence = min(0.90, proximity_result["obstruction_confidence"] + 0.25)
+            reason = proximity_result["reason"]
+            label_map = {
+                "wall_or_flat_surface": "wall",
+                "very_close_object": "close obstacle",
+                "large_uniform_surface": "large surface",
+            }
+            synthetic_label = label_map.get(reason, "obstacle")
+            # Full-frame bounding box (normalized)
+            raw_detections.append(RawDetection(
+                class_id=9999,
+                class_name=synthetic_label,
+                confidence=synthetic_confidence,
+                bbox=BoundingBox(x1=0.1, y1=0.1, x2=0.9, y2=0.9),
+                frame_width=frame_width,
+                frame_height=frame_height,
+            ))
+            logger.info(
+                f"Proximity detection injected: {synthetic_label} "
+                f"(conf={synthetic_confidence:.2f}, reason={reason})"
+            )
+
         # Get session-specific pipeline
         session_id = request.session_id or f"session_{request.user_id}"
         pipeline = get_session_pipeline(session_id)
@@ -542,7 +795,8 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 continue  # Only report persistent objects
 
             bbox = obj.bbox_history[-1]
-            area_ratio = bbox.area / (frame_width * frame_height)
+            # bbox coords are already normalized 0-1, so area IS the ratio
+            area_ratio = bbox.area
 
             # Distance classification
             if area_ratio >= 0.24:
@@ -552,7 +806,7 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
             else:
                 distance = "far"
 
-            # Direction classification
+            # Direction classification (center is already 0-1 normalized)
             ratio = bbox.center[0]
             if ratio < 0.25:
                 direction = "left"
@@ -575,17 +829,20 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 "object_id": obj.object_id  # For debugging
             })
 
-        # Log critical alert if triggered
+        # Log critical alert if triggered (non-blocking, don't fail detection on DB errors)
         if detection_result.alert_triggered and detection_result.risk_level in [RiskLevel.DANGER, RiskLevel.CRITICAL]:
-            alert = AlertHistoryCreate(
-                user_id=request.user_id,
-                session_id=session_id,
-                alert_type="obstacle",
-                message=detection_result.audio_message,
-                location={"latitude": request.latitude, "longitude": request.longitude} if request.latitude else None,
-                priority=detection_result.risk_level.value
-            )
-            await create_alert(alert)
+            try:
+                alert = AlertHistoryCreate(
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    alert_type="obstacle",
+                    message=detection_result.audio_message,
+                    location={"latitude": request.latitude, "longitude": request.longitude} if request.latitude else None,
+                    priority=detection_result.risk_level.value
+                )
+                await create_alert(alert)
+            except Exception as db_err:
+                logger.warning(f"Failed to log alert to DB: {db_err}")
 
         # Add telemetry to response
         response = ObstacleDetectionResponse(
@@ -691,7 +948,7 @@ def generate_audio_message(result: dict) -> str:
 
 @api_router.post("/emergency-alert", response_model=EmergencyAlert)
 async def trigger_emergency_alert(alert: EmergencyAlertCreate):
-    # Get user's emergency contacts
+    # Get user's emergency contacts (safe - returns [] on DB failure)
     contacts = await get_emergency_contacts(alert.user_id)
 
     # Build location dict if available
@@ -714,26 +971,38 @@ async def trigger_emergency_alert(alert: EmergencyAlertCreate):
         notify_errors=alert.notify_errors or []
     )
     
-    await db.emergency_alerts.insert_one(alert_obj.model_dump())
+    # Try MongoDB but don't fail if unavailable (3s timeout)
+    try:
+        await asyncio.wait_for(db.emergency_alerts.insert_one(alert_obj.model_dump()), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for emergency alert: {e}")
     
-    # Log critical alert to history
-    alert_log = AlertHistoryCreate(
-        user_id=alert.user_id,
-        alert_type="emergency",
-        message=alert.message,
-        location=location
-    )
-    await db.alert_history.insert_one(alert_log.model_dump())
+    # Log critical alert to history (non-fatal)
+    try:
+        alert_log = AlertHistoryCreate(
+            user_id=alert.user_id,
+            alert_type="emergency",
+            message=alert.message,
+            location=location
+        )
+        await asyncio.wait_for(db.alert_history.insert_one(alert_log.model_dump()), timeout=3.0)
+    except Exception as e:
+        logger.warning(f"MongoDB write failed for alert history: {e}")
     
     return alert_obj
 
 
 @api_router.get("/emergency-alert/user/{user_id}", response_model=List[EmergencyAlert])
 async def get_user_emergency_alerts(user_id: str):
-    alerts = await db.emergency_alerts.find(
-        {"user_id": user_id}
-    ).sort("created_at", -1).to_list(50)
-    return [EmergencyAlert(**alert) for alert in alerts]
+    try:
+        alerts = await asyncio.wait_for(
+            db.emergency_alerts.find({"user_id": user_id}).sort("created_at", -1).to_list(50),
+            timeout=3.0
+        )
+        return [EmergencyAlert(**alert) for alert in alerts]
+    except Exception as e:
+        logger.warning(f"MongoDB read failed for emergency alerts: {e}")
+        return []
 
 # ==================== HEALTH CHECK ====================
 
@@ -767,6 +1036,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def warmup_yolo_model():
+    """Eagerly load YOLO model and run full pipeline warmup to eliminate cold-start latency."""
+    if YOLO_AVAILABLE:
+        loop = asyncio.get_event_loop()
+
+        def _warmup():
+            try:
+                model = get_yolo_model()
+                if model is not None:
+                    # Use production-sized image to fully pre-allocate memory
+                    dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+                    model(dummy, imgsz=320, conf=0.35, verbose=False)
+                    # Also warm up OpenCV proximity analysis (triggers JIT/init)
+                    analyze_scene_proximity(dummy)
+                    # Warm up detection pipeline
+                    pipeline = get_session_pipeline("__warmup__")
+                    pipeline.process_frame([], 480, 480)
+                    logger.info("YOLO model and full pipeline warmed up successfully")
+            except Exception as exc:
+                logger.warning(f"YOLO warmup failed (non-fatal): {exc}")
+
+        await loop.run_in_executor(None, _warmup)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

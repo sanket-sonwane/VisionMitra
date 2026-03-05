@@ -159,9 +159,17 @@ class TrackedObject:
         if not self.confidence_history:
             return
         self.smoothed_confidence = sum(self.confidence_history) / len(self.confidence_history)
+        
+        # Allow first-frame persistence for high-confidence or large detections
+        # (e.g. a wall covering most of the frame should alert immediately)
+        large_area = (
+            len(self.bbox_history) > 0 and self.bbox_history[-1].area >= 0.15
+        )
+        high_confidence = self.smoothed_confidence >= 0.60
+        
         self.is_persistent = (
-            self.visibility_streak >= 2 and  # At least 2 frames
-            self.smoothed_confidence >= 0.35  # Min confidence
+            (self.visibility_streak >= 2 and self.smoothed_confidence >= 0.35)
+            or (self.visibility_streak >= 1 and high_confidence and large_area)
         )
     
     def classify_motion(self) -> MotionState:
@@ -170,8 +178,8 @@ class TrackedObject:
             self.motion_state = MotionState.STATIONARY
             return self.motion_state
         
-        # Thresholds
-        VELOCITY_THRESHOLD = 5.0  # pixels per frame
+        # Thresholds (bbox coords are normalized 0-1)
+        VELOCITY_THRESHOLD = 0.02  # 2% of frame per update
         GROWTH_THRESHOLD = 0.05  # 5% area change
         
         # Check growth (approaching/receding)
@@ -213,7 +221,7 @@ class ObjectTracker:
         self.max_objects = max_objects
         self.decay_threshold = decay_threshold  # Frames before removal
         self.next_object_id = 0
-        self.match_distance_threshold = 50.0  # pixels
+        self.match_distance_threshold = 0.15  # 15% of frame (normalized coords)
         self.match_size_threshold = 0.3  # 30% size difference
     
     def update(self, raw_detections: List[RawDetection], frame_idx: int) -> List[TrackedObject]:
@@ -323,7 +331,8 @@ class MotionClassifier:
         if len(obj.bbox_history) < 2:
             return False
         
-        center_y = obj.bbox_history[-1].center[1]
+        center_y = obj.bbox_history[-1].center[1]  # 0-1 normalized
+        # frame_center_y should be 0.5 (normalized)
         return center_y > frame_center_y and obj.area_growth_rate > 0.03
 
 
@@ -338,11 +347,14 @@ class StableRiskDecisionEngine:
     def __init__(self):
         self.current_risk = RiskLevel.SAFE
         self.risk_persistance_counter = 0
+        # Thresholds: frames needed before transitioning TO this level
+        # Escalation (SAFE→higher) should be fast for safety
+        # De-escalation (higher→SAFE) should be slow to avoid premature "all clear"
         self.risk_persistance_threshold = {
-            RiskLevel.SAFE: 3,      # Must stay safe for 3 frames
-            RiskLevel.CAUTION: 1,   # Caution can change immediately
-            RiskLevel.DANGER: 2,    # Must stay danger for 2 frames
-            RiskLevel.CRITICAL: 2  # Must stay critical for 2 frames
+            RiskLevel.SAFE: 3,      # Must stay safe for 3 frames before declaring safe
+            RiskLevel.CAUTION: 1,   # Caution triggers immediately
+            RiskLevel.DANGER: 1,    # Danger triggers immediately (safety first)
+            RiskLevel.CRITICAL: 1   # Critical triggers immediately
         }
     
     def evaluate(self, tracked_objects: List[TrackedObject], frame_width: int, frame_height: int) -> Tuple[RiskLevel, str, bool]:
@@ -359,16 +371,17 @@ class StableRiskDecisionEngine:
         if not persistent:
             return self._transition_risk(RiskLevel.SAFE), "forward", False
         
-        # Analyze persistent objects
-        frame_center_x = frame_width / 2
-        frame_center_y = frame_height / 2
+        # Analyze persistent objects (note: bbox coords are normalized 0-1)
+        frame_center_x = 0.5
+        frame_center_y = 0.5
         blocked_directions = {"left": 0, "forward": 0, "right": 0}
         immediate_front = False
         approaching_detected = False
         
         for obj in persistent:
             center_x = obj.bbox_history[-1].center[0]
-            area_ratio = obj.bbox_history[-1].area / (frame_width * frame_height)
+            # bbox coords are already normalized 0-1, so area is a ratio
+            area_ratio = obj.bbox_history[-1].area
             
             # Distance classification
             if area_ratio >= 0.24:
@@ -378,8 +391,8 @@ class StableRiskDecisionEngine:
             else:
                 distance = "far"
             
-            # Direction classification
-            ratio = center_x / max(frame_width, 1)
+            # Direction classification (center_x is already 0-1 normalized)
+            ratio = center_x
             if ratio < 0.25:
                 direction = "left"
             elif ratio < 0.42:
@@ -412,11 +425,22 @@ class StableRiskDecisionEngine:
             safe_direction = min(blocked_directions, key=blocked_directions.get)
         
         # Determine risk level
+        # Check if any persistent object occupies a large area (immediate distance)
+        any_immediate = any(
+            obj.bbox_history[-1].area >= 0.24 for obj in persistent
+        )
+        any_near = any(
+            obj.bbox_history[-1].area >= 0.08 for obj in persistent
+        )
+        
         if immediate_front and blocked_directions["left"] > 0 and blocked_directions["right"] > 0:
             new_risk = RiskLevel.CRITICAL
+        elif immediate_front or (any_immediate and blocked_directions["forward"] > 0):
+            # Single large object directly ahead = DANGER
+            new_risk = RiskLevel.DANGER
         elif any(o.is_persistent and MotionClassifier.classify(o) == MotionState.APPROACHING for o in persistent):
             new_risk = RiskLevel.DANGER
-        elif len(persistent) >= 3 or any(o.smoothed_confidence > 0.85 for o in persistent):
+        elif any_near or len(persistent) >= 2 or any(o.smoothed_confidence > 0.70 for o in persistent):
             new_risk = RiskLevel.CAUTION
         else:
             new_risk = RiskLevel.SAFE

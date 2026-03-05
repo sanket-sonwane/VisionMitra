@@ -11,6 +11,9 @@ import axios from "axios";
 import { useStore } from "@/store";
 import {
   calculateDistance,
+  calculateBearing,
+  bearingToCompass,
+  getRelativeDirection,
   formatDistance,
   generateAudioInstruction,
   type NavigationSegment,
@@ -30,9 +33,14 @@ export default function Camera() {
   const [currentLocation, setCurrentLocation] = useState<Coordinates | null>(null);
   const [currentSegment, setCurrentSegment] = useState<NavigationSegment | null>(null);
   const [segmentProgress, setSegmentProgress] = useState<number>(0);
+  const [deviceHeading, setDeviceHeading] = useState<number | null>(null);
+  const [navigationDirection, setNavigationDirection] = useState<string>("");
   const cameraRef = useRef<any>(null);
   const analysisInterval = useRef<any>(null);
+  const isContinuousRef = useRef(false);
   const locationInterval = useRef<any>(null);
+  const headingSubscription = useRef<any>(null);
+  const lastDirectionAnnounce = useRef<number>(0);
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
   useEffect(() => {
@@ -45,6 +53,9 @@ export default function Camera() {
       }
       if (locationInterval.current) {
         clearInterval(locationInterval.current);
+      }
+      if (headingSubscription.current) {
+        headingSubscription.current.remove();
       }
       Speech.stop();
     };
@@ -62,6 +73,7 @@ export default function Camera() {
       Speech.speak("Segmented navigation active. Starting first segment.");
       updateCurrentSegment();
       startLocationTracking();
+      startHeadingTracking();
     } else {
       Speech.speak("Camera mode. Tap analyze button to detect obstacles.");
     }
@@ -85,7 +97,7 @@ export default function Camera() {
   };
 
   const startLocationTracking = () => {
-    // Track location every 5 seconds to check segment progress
+    // Track location every 5 seconds to check segment progress and update compass
     locationInterval.current = setInterval(async () => {
       try {
         const loc = await Location.getCurrentPositionAsync({});
@@ -95,10 +107,51 @@ export default function Camera() {
         };
         setCurrentLocation(coords);
         checkSegmentCompletion(coords);
+        updateNavigationDirection(coords);
       } catch (error) {
         console.error("Location tracking error:", error);
       }
     }, 5000);
+  };
+
+  const startHeadingTracking = async () => {
+    try {
+      headingSubscription.current = await Location.watchHeadingAsync((heading) => {
+        if (heading.trueHeading >= 0) {
+          setDeviceHeading(heading.trueHeading);
+        } else if (heading.magHeading >= 0) {
+          setDeviceHeading(heading.magHeading);
+        }
+      });
+    } catch (error) {
+      console.warn("Compass heading not available:", error);
+    }
+  };
+
+  const updateNavigationDirection = (coords: Coordinates) => {
+    if (!currentSegment) return;
+
+    const targetBearing = calculateBearing(
+      coords.latitude,
+      coords.longitude,
+      currentSegment.end_coordinates.latitude,
+      currentSegment.end_coordinates.longitude
+    );
+
+    let dirText = "";
+    if (deviceHeading !== null && currentSegment.type === "WALK") {
+      dirText = getRelativeDirection(deviceHeading, targetBearing);
+    } else {
+      dirText = `Head ${bearingToCompass(targetBearing)}`;
+    }
+    setNavigationDirection(dirText);
+
+    // Voice announce direction every 20 seconds during walking
+    const now = Date.now();
+    if (currentSegment.type === "WALK" && dirText && now - lastDirectionAnnounce.current > 20000) {
+      lastDirectionAnnounce.current = now;
+      Speech.speak(dirText);
+    }
   };
 
   const checkSegmentCompletion = async (location: Coordinates) => {
@@ -138,21 +191,22 @@ export default function Camera() {
           null,
           {
             params: { current_segment_index: nextSegmentIndex },
+            timeout: 3000,
           }
         );
-
-        // Update local session
-        const updatedSession = {
-          ...currentSession,
-          current_segment_index: nextSegmentIndex,
-        };
-        setCurrentSession(updatedSession);
-
-        Speech.speak(`Segment complete. Starting next segment.`);
-        setSegmentProgress(0);
       } catch (error) {
-        console.error("Error updating segment:", error);
+        console.warn("Backend segment update failed (non-fatal):", error);
       }
+
+      // Always update local session regardless of backend
+      const updatedSession = {
+        ...currentSession,
+        current_segment_index: nextSegmentIndex,
+      };
+      setCurrentSession(updatedSession);
+
+      Speech.speak(`Segment complete. Starting next segment.`);
+      setSegmentProgress(0);
     } else {
       // All segments complete
       await completeNavigation();
@@ -168,22 +222,23 @@ export default function Camera() {
         null,
         {
           params: { status: "completed" },
+          timeout: 3000,
         }
       );
-
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Speech.speak("Navigation complete. You have arrived at your destination.");
-      
-      // Clear session
-      setCurrentSession(null);
-      setCurrentSegment(null);
-      
-      // Stop tracking
-      if (locationInterval.current) {
-        clearInterval(locationInterval.current);
-      }
     } catch (error) {
-      console.error("Error completing navigation:", error);
+      console.warn("Backend navigation complete failed (non-fatal):", error);
+    }
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Speech.speak("Navigation complete. You have arrived at your destination.");
+    
+    // Clear session
+    setCurrentSession(null);
+    setCurrentSegment(null);
+    
+    // Stop tracking
+    if (locationInterval.current) {
+      clearInterval(locationInterval.current);
     }
   };
 
@@ -222,12 +277,17 @@ export default function Camera() {
     try {
       setIsAnalyzing(true);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      Speech.speak("Analyzing surroundings...");
+
+      // Only announce on manual single-shot analysis, not continuous
+      if (!isContinuousRef.current) {
+        Speech.speak("Analyzing surroundings...");
+      }
 
       // Capture photo
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5,
+        quality: 0.3,
         base64: true,
+        skipProcessing: true,
       });
 
       if (!photo.base64) {
@@ -253,7 +313,7 @@ export default function Camera() {
           latitude: location?.latitude,
           longitude: location?.longitude,
         }, {
-          timeout: 10000
+          timeout: 15000
         });
 
         const result = response.data;
@@ -294,16 +354,24 @@ export default function Camera() {
 
   const startContinuousAnalysis = () => {
     setIsActive(true);
+    isContinuousRef.current = true;
     Speech.speak("Continuous monitoring started");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
-    analysisInterval.current = setInterval(() => {
-      captureAndAnalyze();
-    }, 3000); // Analyze every 3 seconds
+    // Use sequential analysis: fire next as soon as current completes
+    const runLoop = async () => {
+      while (isContinuousRef.current) {
+        await captureAndAnalyze();
+        // Small gap between analyses to prevent overload
+        await new Promise(r => setTimeout(r, 300));
+      }
+    };
+    runLoop();
   };
 
   const stopContinuousAnalysis = () => {
     setIsActive(false);
+    isContinuousRef.current = false;
     Speech.speak("Continuous monitoring stopped");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     
@@ -366,6 +434,12 @@ export default function Camera() {
               </Text>
             </View>
             <Text style={styles.segmentInstructionText}>{currentSegment.instruction}</Text>
+            {navigationDirection ? (
+              <View style={styles.compassRow}>
+                <Ionicons name="compass" size={18} color="#4CAF50" />
+                <Text style={styles.compassDirectionText}>{navigationDirection}</Text>
+              </View>
+            ) : null}
             <View style={styles.segmentProgressBar}>
               <View style={[styles.segmentProgressFill, { width: `${segmentProgress}%` }]} />
             </View>
@@ -600,6 +674,21 @@ const styles = StyleSheet.create({
   segmentDistanceText: {
     fontSize: 12,
     color: "#B0B0B0",
+  },
+  compassRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 10,
+    backgroundColor: "#2A2A2A",
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+  },
+  compassDirectionText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#4CAF50",
   },
   permissionContainer: {
     flex: 1,

@@ -111,6 +111,59 @@ export function calculateDistance(
 }
 
 /**
+ * Calculate initial bearing from point A to point B
+ * Returns bearing in degrees (0-360, where 0=North, 90=East, 180=South, 270=West)
+ */
+export function calculateBearing(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) -
+    Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+
+  const θ = Math.atan2(y, x);
+  return ((θ * 180) / Math.PI + 360) % 360;
+}
+
+/**
+ * Get compass direction label from bearing
+ */
+export function bearingToCompass(bearing: number): string {
+  const directions = [
+    "North", "North-East", "East", "South-East",
+    "South", "South-West", "West", "North-West"
+  ];
+  const index = Math.round(bearing / 45) % 8;
+  return directions[index];
+}
+
+/**
+ * Get relative direction instruction based on user's heading and target bearing
+ * deviceHeading: current compass heading of the device (0-360)
+ * targetBearing: bearing from current position to target (0-360)
+ */
+export function getRelativeDirection(deviceHeading: number, targetBearing: number): string {
+  let diff = ((targetBearing - deviceHeading) + 360) % 360;
+  
+  if (diff <= 30 || diff >= 330) return "Continue straight ahead";
+  if (diff > 30 && diff <= 60) return "Turn slightly right";
+  if (diff > 60 && diff <= 120) return "Turn right";
+  if (diff > 120 && diff <= 150) return "Turn sharp right";
+  if (diff > 150 && diff <= 210) return "Turn around";
+  if (diff > 210 && diff <= 240) return "Turn sharp left";
+  if (diff > 240 && diff <= 300) return "Turn left";
+  return "Turn slightly left";
+}
+
+/**
  * Estimate travel time based on distance and mode
  */
 export function estimateTravelTime(distance: number, mode: SegmentType): number {

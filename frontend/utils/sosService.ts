@@ -283,7 +283,7 @@ export async function triggerEmergencyFlow(
         contacts_attempted: notify.contactsAttempted,
         contacts_notified: notify.contactsNotified,
         notify_errors: notify.notifyErrors,
-      });
+      }, { timeout: 5000 });
       backendLogged = true;
     } catch (error: any) {
       backendLogged = false;

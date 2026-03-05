@@ -318,18 +318,38 @@ export default function Navigate() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       setIsNavigating(true);
 
-      // Create navigation session with journey plan
-      const response = await axios.post(`${BACKEND_URL}/api/navigation-sessions`, {
-        user_id: userId || "demo_user",
-        start_location: currentLocation,
-        destination: destinationCoords,
-        destination_name: destinationQuery,
-        mode: isOnlineMode ? "online" : "offline",
-        journey_plan: journeyPlan, // Include full journey plan
-        current_segment_index: 0,
-      });
+      let sessionData: any = null;
 
-      setCurrentSession(response.data);
+      // Try creating session on backend, but fall back to local if it fails
+      try {
+        const response = await axios.post(`${BACKEND_URL}/api/navigation-sessions`, {
+          user_id: userId || "demo_user",
+          start_location: currentLocation,
+          destination: destinationCoords,
+          destination_name: destinationQuery,
+          mode: isOnlineMode ? "online" : "offline",
+          journey_plan: journeyPlan,
+          current_segment_index: 0,
+        }, { timeout: 5000 });
+        sessionData = response.data;
+      } catch (backendError) {
+        console.warn("Backend session creation failed, using local session:", backendError);
+        // Create a local session so navigation works without backend
+        sessionData = {
+          id: `local_${Date.now()}`,
+          user_id: userId || "demo_user",
+          start_location: currentLocation,
+          destination: destinationCoords,
+          destination_name: destinationQuery,
+          mode: isOnlineMode ? "online" : "offline",
+          journey_plan: journeyPlan,
+          current_segment_index: 0,
+          status: "active",
+          started_at: new Date().toISOString(),
+        };
+      }
+
+      setCurrentSession(sessionData);
       Speech.speak(`Navigation started. ${generateAudioInstruction(journeyPlan.segments[0])}`);
       
       // Open camera for live navigation

@@ -63,12 +63,25 @@ export default function Emergency() {
     relationship: "",
   });
   const [sosActive, setSosActive] = useState(false);
-  const { userId } = useStore();
+  const {
+    userId,
+    emergencyContacts: storedContacts,
+    setEmergencyContacts,
+    addEmergencyContact,
+    removeEmergencyContact,
+  } = useStore();
 
   useEffect(() => {
     Speech.speak("Emergency contacts. Add contacts for SOS alerts.");
     loadContacts();
   }, []);
+
+  // Sync local contacts state with store whenever contacts change
+  useEffect(() => {
+    if (contacts.length > 0) {
+      setEmergencyContacts(contacts);
+    }
+  }, [contacts]);
 
   const loadContacts = async () => {
     try {
@@ -81,8 +94,12 @@ export default function Emergency() {
       setContacts(response.data);
     } catch (error) {
       console.error("Load contacts error:", error);
-      if (isNetworkError(error)) {
-        Speech.speak("Cannot reach backend. Please check server and network.");
+      // Fall back to locally stored contacts
+      if (storedContacts.length > 0) {
+        setContacts(storedContacts);
+        console.log("Using locally stored contacts as fallback");
+      } else if (isNetworkError(error)) {
+        Speech.speak("Backend unavailable. You can still add contacts locally.");
       }
     }
   };
@@ -93,8 +110,17 @@ export default function Emergency() {
       return;
     }
 
+    const contactData: EmergencyContact = {
+      id: `local_${Date.now()}`,
+      name: newContact.name,
+      phone: newContact.phone,
+      relationship: newContact.relationship || "Contact",
+      priority: contacts.length + 1,
+    };
+
+    // Try backend first
     try {
-      await requestWithFallback((baseUrl) =>
+      const response = await requestWithFallback((baseUrl) =>
         axios.post(
           `${baseUrl}/api/emergency-contacts`,
           {
@@ -107,36 +133,41 @@ export default function Emergency() {
           { timeout: API_TIMEOUT }
         )
       );
-
-      Speech.speak("Contact added successfully.");
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setNewContact({ name: "", phone: "", relationship: "" });
-      setShowAddForm(false);
-      loadContacts();
+      // Use backend-returned contact (has server-generated id)
+      const serverContact = response.data;
+      setContacts((prev) => [...prev, serverContact]);
+      addEmergencyContact(serverContact);
     } catch (error) {
-      console.error("Add contact error:", error);
-      Speech.speak(
-        isNetworkError(error)
-          ? "Cannot reach backend. Please check server and network."
-          : "Failed to add contact."
-      );
+      console.warn("Backend add failed, saving locally:", error);
+      // Save locally even if backend fails
+      setContacts((prev) => [...prev, contactData]);
+      addEmergencyContact(contactData);
     }
+
+    Speech.speak("Contact added successfully.");
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setNewContact({ name: "", phone: "", relationship: "" });
+    setShowAddForm(false);
   };
 
   const deleteContact = async (contactId: string, name: string) => {
+    // Always remove locally
+    setContacts((prev) => prev.filter((c) => c.id !== contactId));
+    removeEmergencyContact(contactId);
+
+    // Try backend (non-fatal)
     try {
       await requestWithFallback((baseUrl) =>
         axios.delete(`${baseUrl}/api/emergency-contacts/${contactId}`, {
           timeout: API_TIMEOUT,
         })
       );
-      Speech.speak(`${name} removed.`);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      loadContacts();
     } catch (error) {
-      console.error("Delete contact error:", error);
-      Speech.speak("Failed to remove contact.");
+      console.warn("Backend delete failed, removed locally:", error);
     }
+
+    Speech.speak(`${name} removed.`);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
   const triggerSOS = async () => {
