@@ -51,6 +51,15 @@ __pycache__/
 *pyc*
 venv/
 .venv/
+.venv-1/
+
+# Model weights
+*.pt
+
+# Build artifacts
+cloudflared.exe
+frontend/.metro-cache/
+frontend/android/app/build/
 
 # Development tools
 chainlit.md
