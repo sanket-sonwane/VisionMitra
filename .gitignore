@@ -60,6 +60,8 @@ venv/
 cloudflared.exe
 frontend/.metro-cache/
 frontend/android/app/build/
+frontend/android/app/.cxx/
+frontend/android/build/
 
 # Development tools
 chainlit.md
