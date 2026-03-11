@@ -1,4 +1,4 @@
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Platform } from "react-native";
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Platform, ScrollView, Image } from "react-native";
 import { CameraView, useCameraPermissions, CameraType } from "expo-camera";
 import { useState, useEffect, useRef } from "react";
 import { Ionicons } from "@expo/vector-icons";
@@ -41,6 +41,8 @@ export default function Camera() {
   const locationInterval = useRef<any>(null);
   const headingSubscription = useRef<any>(null);
   const lastDirectionAnnounce = useRef<number>(0);
+  const [showDebugImage, setShowDebugImage] = useState(false);
+  const [showDebugInfo, setShowDebugInfo] = useState(false);
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
   useEffect(() => {
@@ -319,6 +321,17 @@ export default function Camera() {
         const result = response.data;
         setLastAnalysis(result);
 
+        // Log debug info to console
+        if (result.debug_info) {
+          console.log('[DEBUG-DETECT] Response debug_info:', JSON.stringify(result.debug_info, null, 2));
+        }
+        if (result.debug_annotated_image) {
+          console.log('[DEBUG-DETECT] Annotated image received, length:', result.debug_annotated_image.length);
+        }
+        console.log('[DEBUG-DETECT] Obstacles:', JSON.stringify(result.obstacles, null, 2));
+        console.log('[DEBUG-DETECT] Warning level:', result.warning_level);
+        console.log('[DEBUG-DETECT] Audio message:', result.audio_message);
+
         // Haptic feedback based on warning level
         if (result.warning_level === "critical" || result.warning_level === "danger") {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -449,6 +462,19 @@ export default function Camera() {
           </View>
         )}
 
+        {lastAnalysis && lastAnalysis.debug_annotated_image && showDebugImage && (
+          <View style={styles.debugImageOverlay}>
+            <Image
+              source={{ uri: `data:image/jpeg;base64,${lastAnalysis.debug_annotated_image}` }}
+              style={styles.debugImage}
+              resizeMode="contain"
+            />
+            <TouchableOpacity style={styles.closeDebugButton} onPress={() => setShowDebugImage(false)}>
+              <Ionicons name="close" size={24} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        )}
+
         {lastAnalysis && (
           <View style={[styles.statusOverlay, { backgroundColor: getWarningColor(lastAnalysis.warning_level) + "CC" }]}>
             <Text style={styles.statusText}>{lastAnalysis.warning_level?.toUpperCase()}</Text>
@@ -462,6 +488,24 @@ export default function Camera() {
       </View>
 
       <View style={styles.controls}>
+        {/* Debug toggle buttons */}
+        <View style={styles.debugToggleRow}>
+          <TouchableOpacity
+            style={[styles.debugToggleButton, showDebugImage && styles.debugToggleActive]}
+            onPress={() => setShowDebugImage(!showDebugImage)}
+          >
+            <Ionicons name="image" size={16} color="#fff" />
+            <Text style={styles.debugToggleText}>Boxes</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.debugToggleButton, showDebugInfo && styles.debugToggleActive]}
+            onPress={() => setShowDebugInfo(!showDebugInfo)}
+          >
+            <Ionicons name="bug" size={16} color="#fff" />
+            <Text style={styles.debugToggleText}>Debug</Text>
+          </TouchableOpacity>
+        </View>
+
         {!isActive ? (
           <>
             <TouchableOpacity
@@ -501,7 +545,72 @@ export default function Camera() {
         <View style={styles.resultContainer}>
           <Text style={styles.resultTitle}>Last Analysis:</Text>
           <Text style={styles.resultMessage}>{lastAnalysis.audio_message}</Text>
+          {lastAnalysis.obstacles && lastAnalysis.obstacles.length > 0 && (
+            <View style={styles.obstacleList}>
+              {lastAnalysis.obstacles.map((obs: any, idx: number) => (
+                <Text key={idx} style={styles.obstacleItem}>
+                  {obs.type} • {obs.distance} • {obs.direction} • conf:{obs.confidence} • {obs.moving}
+                </Text>
+              ))}
+            </View>
+          )}
         </View>
+      )}
+
+      {showDebugInfo && lastAnalysis?.debug_info && (
+        <ScrollView style={styles.debugInfoPanel}>
+          <Text style={styles.debugInfoTitle}>Debug Telemetry</Text>
+          <Text style={styles.debugInfoText}>
+            YOLO available: {String(lastAnalysis.debug_info.yolo_available ?? 'N/A')}
+          </Text>
+          <Text style={styles.debugInfoText}>
+            Total YOLO boxes: {lastAnalysis.debug_info.total_yolo_boxes ?? 'N/A'}
+          </Text>
+          <Text style={styles.debugInfoText}>
+            Mobility filtered: {lastAnalysis.debug_info.mobility_filtered_detections ?? 'N/A'}
+          </Text>
+          <Text style={styles.debugInfoText}>
+            Obstacles reported: {lastAnalysis.debug_info.obstacles_count ?? 'N/A'}
+          </Text>
+          <Text style={styles.debugInfoText}>
+            Synthetic injected: {String(lastAnalysis.debug_info.synthetic_detection_injected ?? 'N/A')}
+          </Text>
+          <Text style={styles.debugInfoText}>
+            Frame shape: {JSON.stringify(lastAnalysis.debug_info.frame_shape)}
+          </Text>
+          <Text style={styles.debugInfoText}>
+            Decode: {lastAnalysis.debug_info.decode_time_ms ?? '?'}ms | 
+            Inference: {lastAnalysis.debug_info.inference_time_ms ?? '?'}ms | 
+            Pipeline: {lastAnalysis.debug_info.pipeline_time_ms ?? '?'}ms | 
+            Total: {lastAnalysis.debug_info.total_time_ms ?? '?'}ms
+          </Text>
+          {lastAnalysis.debug_info.all_yolo_detections && (
+            <View>
+              <Text style={styles.debugInfoSubtitle}>All YOLO Detections (raw):</Text>
+              {lastAnalysis.debug_info.all_yolo_detections.map((det: any, idx: number) => (
+                <Text key={idx} style={styles.debugInfoDetection}>
+                  #{det.idx} {det.class_name} conf={det.confidence} mob={String(det.is_mobility_relevant)} bbox={JSON.stringify(det.bbox_px)}
+                </Text>
+              ))}
+            </View>
+          )}
+          {lastAnalysis.debug_info.pipeline_debug && (
+            <View>
+              <Text style={styles.debugInfoSubtitle}>Pipeline Debug:</Text>
+              <Text style={styles.debugInfoText}>
+                {JSON.stringify(lastAnalysis.debug_info.pipeline_debug, null, 2)}
+              </Text>
+            </View>
+          )}
+          {lastAnalysis.debug_info.proximity_result && (
+            <View>
+              <Text style={styles.debugInfoSubtitle}>Proximity Analysis:</Text>
+              <Text style={styles.debugInfoText}>
+                {JSON.stringify(lastAnalysis.debug_info.proximity_result, null, 2)}
+              </Text>
+            </View>
+          )}
+        </ScrollView>
       )}
     </SafeAreaView>
   );
@@ -712,5 +821,98 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "600",
     color: "#fff",
+  },
+  debugImageOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.85)",
+    zIndex: 10,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  debugImage: {
+    width: "95%",
+    height: "95%",
+  },
+  closeDebugButton: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    backgroundColor: "#F44336",
+    borderRadius: 20,
+    padding: 8,
+  },
+  debugToggleRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 12,
+    marginBottom: 8,
+  },
+  debugToggleButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#333",
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#555",
+  },
+  debugToggleActive: {
+    backgroundColor: "#FF9800",
+    borderColor: "#FF9800",
+  },
+  debugToggleText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#fff",
+  },
+  obstacleList: {
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#333",
+    paddingTop: 8,
+  },
+  obstacleItem: {
+    fontSize: 12,
+    color: "#FFD54F",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    marginBottom: 2,
+  },
+  debugInfoPanel: {
+    maxHeight: 250,
+    backgroundColor: "#0D0D0D",
+    padding: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#FF9800",
+  },
+  debugInfoTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#FF9800",
+    marginBottom: 8,
+  },
+  debugInfoSubtitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#FFA726",
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  debugInfoText: {
+    fontSize: 11,
+    color: "#B0B0B0",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    marginBottom: 3,
+  },
+  debugInfoDetection: {
+    fontSize: 10,
+    color: "#81C784",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    marginBottom: 2,
   },
 });

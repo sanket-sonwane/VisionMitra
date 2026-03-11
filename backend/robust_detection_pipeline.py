@@ -29,6 +29,7 @@ import logging
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 # ==================== ENUMS ====================
@@ -129,6 +130,10 @@ class TrackedObject:
         self.visibility_streak += 1
         self._update_motion_metrics()
         self._update_smoothed_confidence()
+        logger.debug(f"[TRACK-OBJ] {self.object_id} updated: class={self.class_name}, "
+                     f"conf={confidence:.3f}, smoothed={self.smoothed_confidence:.3f}, "
+                     f"streak={self.visibility_streak}, persistent={self.is_persistent}, "
+                     f"motion={self.motion_state.value}, area={bbox.area:.4f}")
     
     def decay(self):
         """Increment decay counter (temporal memory)"""
@@ -160,17 +165,21 @@ class TrackedObject:
             return
         self.smoothed_confidence = sum(self.confidence_history) / len(self.confidence_history)
         
-        # Allow first-frame persistence for high-confidence or large detections
-        # (e.g. a wall covering most of the frame should alert immediately)
         large_area = (
             len(self.bbox_history) > 0 and self.bbox_history[-1].area >= 0.15
         )
         high_confidence = self.smoothed_confidence >= 0.60
         
+        old_persistent = self.is_persistent
         self.is_persistent = (
             (self.visibility_streak >= 2 and self.smoothed_confidence >= 0.35)
             or (self.visibility_streak >= 1 and high_confidence and large_area)
         )
+        
+        if self.is_persistent != old_persistent:
+            logger.debug(f"[TRACK-OBJ] {self.object_id} persistence CHANGED: {old_persistent} -> {self.is_persistent} "
+                         f"(streak={self.visibility_streak}, smoothed_conf={self.smoothed_confidence:.3f}, "
+                         f"large_area={large_area}, high_conf={high_confidence})")
     
     def classify_motion(self) -> MotionState:
         """Classify motion state based on velocity and growth"""
@@ -226,6 +235,8 @@ class ObjectTracker:
     
     def update(self, raw_detections: List[RawDetection], frame_idx: int) -> List[TrackedObject]:
         """Match detections to tracked objects and update states"""
+        logger.debug(f"[TRACKER] === Frame {frame_idx}: {len(raw_detections)} raw detections, "
+                     f"{len(self.tracked_objects)} existing tracked objects ===")
         
         # Increase decay counter for all objects
         for obj in self.tracked_objects.values():
@@ -233,11 +244,12 @@ class ObjectTracker:
         
         # Match detections to tracked objects
         matched_ids = set()
-        for detection in raw_detections:
+        for i, detection in enumerate(raw_detections):
             match_id = self._find_best_match(detection)
             
             if match_id:
-                # Update existing tracked object
+                logger.debug(f"[TRACKER] Detection #{i} ({detection.class_name} conf={detection.confidence:.3f}) "
+                             f"-> MATCHED to {match_id}")
                 self.tracked_objects[match_id].add_detection(
                     detection.bbox,
                     detection.confidence,
@@ -245,8 +257,9 @@ class ObjectTracker:
                 )
                 matched_ids.add(match_id)
             else:
-                # Create new tracked object
                 new_id = self._create_new_id()
+                logger.debug(f"[TRACKER] Detection #{i} ({detection.class_name} conf={detection.confidence:.3f}) "
+                             f"-> NEW object {new_id}")
                 new_obj = TrackedObject(
                     object_id=new_id,
                     class_name=detection.class_name,
@@ -262,9 +275,11 @@ class ObjectTracker:
             if obj.decay_counter > self.decay_threshold
         ]
         for obj_id in to_remove:
-            logger.debug(f"Removing object {obj_id} after {self.decay_threshold} frame decay")
+            logger.debug(f"[TRACKER] REMOVING object {obj_id} (decay={self.tracked_objects[obj_id].decay_counter} > threshold={self.decay_threshold})")
             del self.tracked_objects[obj_id]
         
+        logger.debug(f"[TRACKER] Frame {frame_idx} result: {len(self.tracked_objects)} tracked objects, "
+                     f"{len(matched_ids)} matched, {len(to_remove)} removed")
         return list(self.tracked_objects.values())
     
     def _find_best_match(self, detection: RawDetection) -> Optional[str]:
@@ -272,26 +287,28 @@ class ObjectTracker:
         candidates = []
         
         for obj_id, obj in self.tracked_objects.items():
-            # Same class name required
             if obj.class_name != detection.class_name:
                 continue
             
-            # Skip if decay is too high (object likely gone)
             if obj.decay_counter > 2:
+                logger.debug(f"[TRACKER-MATCH] Skip {obj_id} (decay={obj.decay_counter}>2)")
                 continue
             
-            # Compute match score
             distance = self._bbox_distance(obj.bbox_history[-1], detection.bbox)
             size_ratio = obj.bbox_history[-1].area / detection.bbox.area if detection.bbox.area > 0 else 0
+            
+            logger.debug(f"[TRACKER-MATCH] Candidate {obj_id}: dist={distance:.4f} (thresh={self.match_distance_threshold}), "
+                         f"size_ratio={size_ratio:.3f} (range={1-self.match_size_threshold:.1f}-{1+self.match_size_threshold:.1f})")
             
             if distance < self.match_distance_threshold and 1 - self.match_size_threshold < size_ratio < 1 + self.match_size_threshold:
                 candidates.append((distance, obj_id))
         
         if not candidates:
+            logger.debug(f"[TRACKER-MATCH] No match found for {detection.class_name} (conf={detection.confidence:.3f})")
             return None
         
-        # Return best match (lowest distance)
         candidates.sort(key=lambda x: x[0])
+        logger.debug(f"[TRACKER-MATCH] Best match: {candidates[0][1]} (dist={candidates[0][0]:.4f})")
         return candidates[0][1]
     
     def _bbox_distance(self, bbox1: BoundingBox, bbox2: BoundingBox) -> float:
@@ -360,15 +377,15 @@ class StableRiskDecisionEngine:
     def evaluate(self, tracked_objects: List[TrackedObject], frame_width: int, frame_height: int) -> Tuple[RiskLevel, str, bool]:
         """
         Evaluate risk level based on persistent objects.
-        
-        Returns:
-            (risk_level, safe_direction, should_trigger_alert)
         """
-        
-        # Filter to persistent objects only
         persistent = [obj for obj in tracked_objects if obj.is_persistent]
+        logger.debug(f"[RISK] Evaluating: {len(tracked_objects)} tracked, {len(persistent)} persistent")
+        for obj in tracked_objects:
+            logger.debug(f"[RISK] Object {obj.object_id}: class={obj.class_name}, persistent={obj.is_persistent}, "
+                         f"streak={obj.visibility_streak}, conf={obj.smoothed_confidence:.3f}")
         
         if not persistent:
+            logger.debug("[RISK] No persistent objects -> transitioning to SAFE")
             return self._transition_risk(RiskLevel.SAFE), "forward", False
         
         # Analyze persistent objects (note: bbox coords are normalized 0-1)
@@ -425,7 +442,6 @@ class StableRiskDecisionEngine:
             safe_direction = min(blocked_directions, key=blocked_directions.get)
         
         # Determine risk level
-        # Check if any persistent object occupies a large area (immediate distance)
         any_immediate = any(
             obj.bbox_history[-1].area >= 0.24 for obj in persistent
         )
@@ -433,10 +449,13 @@ class StableRiskDecisionEngine:
             obj.bbox_history[-1].area >= 0.08 for obj in persistent
         )
         
+        logger.debug(f"[RISK] immediate_front={immediate_front}, any_immediate={any_immediate}, "
+                     f"any_near={any_near}, approaching={approaching_detected}, "
+                     f"blocked={blocked_directions}, safe_dir_candidate={safe_direction}")
+        
         if immediate_front and blocked_directions["left"] > 0 and blocked_directions["right"] > 0:
             new_risk = RiskLevel.CRITICAL
         elif immediate_front or (any_immediate and blocked_directions["forward"] > 0):
-            # Single large object directly ahead = DANGER
             new_risk = RiskLevel.DANGER
         elif any(o.is_persistent and MotionClassifier.classify(o) == MotionState.APPROACHING for o in persistent):
             new_risk = RiskLevel.DANGER
@@ -445,8 +464,11 @@ class StableRiskDecisionEngine:
         else:
             new_risk = RiskLevel.SAFE
         
+        logger.debug(f"[RISK] Computed new_risk={new_risk.value} (current={self.current_risk.value})")
+        
         # Apply hysteresis
         final_risk, should_trigger = self._apply_hysteresis(new_risk)
+        logger.debug(f"[RISK] After hysteresis: final_risk={final_risk.value}, should_trigger={should_trigger}")
         
         return final_risk, safe_direction, should_trigger
     
@@ -513,10 +535,9 @@ class AlertManager:
     ) -> Tuple[str, Optional[AlertTriggerEvent]]:
         """
         Generate alert message and determine if should announce.
-        
-        Returns:
-            (message, alert_event) or ("", None) if no new alert needed
         """
+        logger.debug(f"[ALERT] Generating alert: risk={risk_level.value}, objects={len(tracked_objects)}, "
+                     f"safe_dir={safe_direction}, force={force_new}")
         
         # Build message
         if risk_level == RiskLevel.CRITICAL:
@@ -534,8 +555,10 @@ class AlertManager:
         
         # Deduplication: don't repeat same message immediately
         if message == self.last_alert_message and not force_new:
+            logger.debug(f"[ALERT] Deduplicated (same message), returning empty")
             return "", None
         
+        logger.info(f"[ALERT] NEW alert: event={event.value}, message='{message[:80]}...'")
         self.last_alert_message = message
         self.last_alert_time = time.time()
         
@@ -682,27 +705,42 @@ class RobustDetectionPipeline:
             self.frame_index += 1
             timestamp = time.time()
             
+            logger.info(f"[PIPELINE] ===== Frame {self.frame_index} =====")
+            logger.info(f"[PIPELINE] Input: {len(raw_detections)} raw detections, frame={frame_width}x{frame_height}")
+            for i, det in enumerate(raw_detections):
+                logger.debug(f"[PIPELINE] Raw det #{i}: class={det.class_name}, conf={det.confidence:.3f}, "
+                             f"bbox=({det.bbox.x1:.3f},{det.bbox.y1:.3f})-({det.bbox.x2:.3f},{det.bbox.y2:.3f}), "
+                             f"area={det.bbox.area:.4f}")
+            
             # Step 1: Track objects across frames
+            logger.debug(f"[PIPELINE] Step 1: Object tracking...")
             tracked_objects = self.tracker.update(raw_detections, self.frame_index)
+            logger.info(f"[PIPELINE] Step 1 result: {len(tracked_objects)} tracked objects")
             
             # Step 2: Classify motion for all objects
+            logger.debug(f"[PIPELINE] Step 2: Motion classification...")
             for obj in tracked_objects:
-                MotionClassifier.classify(obj)
+                motion = MotionClassifier.classify(obj)
+                logger.debug(f"[PIPELINE] Step 2: {obj.object_id} motion={motion.value}")
             
             # Step 3: Evaluate risk with hysteresis
+            logger.debug(f"[PIPELINE] Step 3: Risk evaluation...")
             risk_level, safe_direction, should_trigger_alert = self.risk_engine.evaluate(
                 tracked_objects,
                 frame_width,
                 frame_height
             )
+            logger.info(f"[PIPELINE] Step 3 result: risk={risk_level.value}, safe_dir={safe_direction}, trigger={should_trigger_alert}")
             
             # Step 4: Generate alert message
+            logger.debug(f"[PIPELINE] Step 4: Alert generation...")
             alert_message, alert_event = self.alert_manager.generate_alert(
                 risk_level,
                 tracked_objects,
                 safe_direction,
                 force_new=should_trigger_alert
             )
+            logger.info(f"[PIPELINE] Step 4 result: alert_msg='{alert_message[:60] if alert_message else 'None'}', event={alert_event}")
             
             # Create detection frame result
             result = DetectionFrame(
@@ -721,12 +759,14 @@ class RobustDetectionPipeline:
             # Store frame in history
             self.frame_history.append(result)
             
-            logger.debug(f"Frame {self.frame_index}: Risk={risk_level.value}, Objects={len(tracked_objects)}, Alert={result.alert_triggered}")
+            logger.info(f"[PIPELINE] Frame {self.frame_index} COMPLETE: Risk={risk_level.value}, "
+                        f"Objects={len(tracked_objects)}, Persistent={len([o for o in tracked_objects if o.is_persistent])}, "
+                        f"Alert={result.alert_triggered}, Message='{result.audio_message[:60]}'")
             
             return result
         
         except Exception as e:
-            logger.error(f"Pipeline error: {str(e)}")
+            logger.error(f"[PIPELINE] ERROR in frame {self.frame_index}: {str(e)}", exc_info=True)
             # Fail-safe: assume danger
             return DetectionFrame(
                 frame_index=self.frame_index,

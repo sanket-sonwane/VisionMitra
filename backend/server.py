@@ -87,12 +87,13 @@ def clear_session_pipeline(session_id: str):
             del _session_pipelines[session_id]
             logger.info(f"Cleared pipeline for session {session_id}")
 
-# Configure logging
+# Configure logging - DEBUG level for detection-debug branch
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # ==================== MODELS ====================
 
@@ -190,6 +191,8 @@ class ObstacleDetectionResponse(BaseModel):
     safe_direction: Optional[str] = None
     warning_level: str  # safe, caution, danger, critical
     audio_message: str
+    debug_annotated_image: Optional[str] = None  # base64 annotated image with boxes
+    debug_info: Optional[dict] = None  # detailed debug telemetry
 
 class EmergencyAlert(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -442,28 +445,127 @@ async def get_user_alerts(user_id: str, limit: int = 50):
 
 def get_yolo_model():
     global _yolo_model
+    logger.debug(f"[DEBUG-YOLO] get_yolo_model called. YOLO_AVAILABLE={YOLO_AVAILABLE}, model_loaded={_yolo_model is not None}")
+    logger.debug(f"[DEBUG-YOLO] ENABLE_VISION_AI={ENABLE_VISION_AI}, CV2_AVAILABLE={CV2_AVAILABLE}, np_available={np is not None}")
     if not YOLO_AVAILABLE:
+        logger.warning(f"[DEBUG-YOLO] YOLO not available! ENABLE_VISION_AI={ENABLE_VISION_AI}, CV2={CV2_AVAILABLE}, numpy={np is not None}")
         return None
 
     if _yolo_model is not None:
+        logger.debug("[DEBUG-YOLO] Returning cached model")
         return _yolo_model
 
     with _yolo_lock:
         if _yolo_model is None:
             try:
                 from ultralytics import YOLO as UltralyticsYOLO
-                _yolo_model = UltralyticsYOLO(YOLO_MODEL_PATH)
+                model_path = YOLO_MODEL_PATH
+                logger.info(f"[DEBUG-YOLO] Loading model from: {model_path}")
+                logger.info(f"[DEBUG-YOLO] Model file exists: {os.path.exists(model_path)}")
+                _yolo_model = UltralyticsYOLO(model_path)
+                logger.info(f"[DEBUG-YOLO] Model loaded successfully: {type(_yolo_model)}")
             except Exception as exc:
-                logger.warning(f"YOLO disabled: failed to load ultralytics model ({exc})")
+                logger.error(f"[DEBUG-YOLO] FAILED to load model: {exc}", exc_info=True)
                 return None
     return _yolo_model
 
 
 def decode_base64_image(image_base64: str):
+    logger.debug(f"[DEBUG-DECODE] Input base64 length: {len(image_base64)}")
+    logger.debug(f"[DEBUG-DECODE] Has data URI prefix: {',' in image_base64[:50]}")
     image_str = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
-    image_bytes = base64.b64decode(image_str)
+    logger.debug(f"[DEBUG-DECODE] Stripped base64 length: {len(image_str)}")
+    try:
+        image_bytes = base64.b64decode(image_str)
+        logger.debug(f"[DEBUG-DECODE] Decoded bytes length: {len(image_bytes)}")
+    except Exception as e:
+        logger.error(f"[DEBUG-DECODE] base64 decode FAILED: {e}")
+        return None
     np_arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    logger.debug(f"[DEBUG-DECODE] numpy array shape: {np_arr.shape}, dtype: {np_arr.dtype}")
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        logger.error("[DEBUG-DECODE] cv2.imdecode returned None! Image data may be corrupt.")
+    else:
+        logger.debug(f"[DEBUG-DECODE] Decoded frame: shape={frame.shape}, dtype={frame.dtype}")
+    return frame
+
+
+def draw_debug_boxes(frame, raw_detections, tracked_objects=None, risk_level=None, safe_direction=None):
+    """
+    Draw bounding boxes with labels and confidence scores on the frame.
+    Returns annotated frame as base64 string.
+    """
+    if frame is None or not CV2_AVAILABLE:
+        logger.warning("[DEBUG-DRAW] Cannot draw boxes: frame is None or cv2 unavailable")
+        return None
+
+    annotated = frame.copy()
+    h, w = annotated.shape[:2]
+    logger.debug(f"[DEBUG-DRAW] Drawing on frame {w}x{h}, {len(raw_detections)} raw detections")
+
+    # Color map for different risk implications
+    COLORS = {
+        "immediate": (0, 0, 255),    # Red - very close
+        "near": (0, 165, 255),       # Orange - nearby
+        "far": (0, 255, 0),          # Green - far away
+        "default": (255, 255, 0),    # Cyan - fallback
+    }
+
+    # Draw ALL raw YOLO detections (before any filtering)
+    for i, det in enumerate(raw_detections):
+        # Convert normalized coords back to pixel coords
+        x1 = int(det.bbox.x1 * w)
+        y1 = int(det.bbox.y1 * h)
+        x2 = int(det.bbox.x2 * w)
+        y2 = int(det.bbox.y2 * h)
+
+        # Determine distance for color
+        area_ratio = det.bbox.area
+        if area_ratio >= 0.24:
+            dist_label = "immediate"
+        elif area_ratio >= 0.08:
+            dist_label = "near"
+        else:
+            dist_label = "far"
+
+        color = COLORS.get(dist_label, COLORS["default"])
+
+        # Draw bounding box
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+        # Label with class name + confidence + distance
+        label = f"{det.class_name} {det.confidence:.2f} [{dist_label}]"
+        label_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        # Background for text
+        cv2.rectangle(annotated, (x1, y1 - label_size[1] - 6), (x1 + label_size[0], y1), color, -1)
+        cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+        logger.debug(f"[DEBUG-DRAW] Box #{i}: {det.class_name} conf={det.confidence:.3f} "
+                     f"bbox=({x1},{y1})-({x2},{y2}) area_ratio={area_ratio:.4f} dist={dist_label}")
+
+    # Draw tracked object IDs if available
+    if tracked_objects:
+        for obj in tracked_objects:
+            if obj.bbox_history:
+                bbox = obj.bbox_history[-1]
+                cx = int(bbox.center[0] * w)
+                cy = int(bbox.center[1] * h)
+                # Draw tracking ID and persistence info
+                track_label = f"ID:{obj.object_id} v:{obj.visibility_streak} {'P' if obj.is_persistent else 'T'}"
+                cv2.putText(annotated, track_label, (cx - 40, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+    # Draw overall status overlay
+    status_text = f"Risk: {risk_level or 'N/A'} | Safe Dir: {safe_direction or 'N/A'} | Detections: {len(raw_detections)}"
+    cv2.rectangle(annotated, (0, 0), (w, 30), (0, 0, 0), -1)
+    cv2.putText(annotated, status_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+    # Encode to base64
+    _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    annotated_b64 = base64.b64encode(buffer).decode('utf-8')
+    logger.debug(f"[DEBUG-DRAW] Annotated image base64 length: {len(annotated_b64)}")
+    return annotated_b64
 
 
 # ==================== PROXIMITY / WALL DETECTION ====================
@@ -478,10 +580,13 @@ def analyze_scene_proximity(frame) -> dict:
       - obstruction_confidence: float 0-1
       - reason: str
     """
+    logger.debug(f"[DEBUG-PROXIMITY] Called with frame={frame is not None}, CV2={CV2_AVAILABLE}")
     if frame is None or not CV2_AVAILABLE:
+        logger.warning("[DEBUG-PROXIMITY] Skipped: frame is None or cv2 unavailable")
         return {"is_obstructed": False, "obstruction_confidence": 0.0, "reason": "no_frame"}
     
     h, w = frame.shape[:2]
+    logger.debug(f"[DEBUG-PROXIMITY] Frame size: {w}x{h}")
     result = {"is_obstructed": False, "obstruction_confidence": 0.0, "reason": "clear"}
     
     scores = []
@@ -490,6 +595,7 @@ def analyze_scene_proximity(frame) -> dict:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
     edge_density = float(np.count_nonzero(edges)) / (h * w)
+    logger.debug(f"[DEBUG-PROXIMITY] Edge density: {edge_density:.4f}")
     # Very low edge density → likely facing a flat surface
     if edge_density < 0.02:
         scores.append(0.7)
@@ -542,6 +648,7 @@ def analyze_scene_proximity(frame) -> dict:
     
     # --- Aggregate score ---
     avg_score = sum(scores) / len(scores) if scores else 0.0
+    logger.debug(f"[DEBUG-PROXIMITY] Scores breakdown: {scores}, average={avg_score:.3f}")
     
     if avg_score >= 0.45:
         result["is_obstructed"] = True
@@ -553,8 +660,9 @@ def analyze_scene_proximity(frame) -> dict:
         else:
             result["reason"] = "large_uniform_surface"
     
-    logger.debug(
-        f"Proximity analysis: edge_density={edge_density:.4f}, std_dev={std_dev:.1f}, "
+    logger.info(
+        f"[DEBUG-PROXIMITY] Result: obstructed={result['is_obstructed']}, conf={result['obstruction_confidence']}, "
+        f"reason={result['reason']} | edge_density={edge_density:.4f}, std_dev={std_dev:.1f}, "
         f"laplacian={laplacian_var:.1f}, color_coverage={max_coverage:.2f}, score={avg_score:.3f}"
     )
     
@@ -637,37 +745,55 @@ MOBILITY_RELEVANT_CLASSES = {
 async def detect_obstacles(request: ObstacleDetectionRequest):
     """
     Production-grade obstacle detection with temporal consistency.
-    
-    Uses robust pipeline for:
-    - Frame-to-frame object tracking
-    - Confidence smoothing
-    - Motion classification
-    - Stable risk decision making with hysteresis
-    - Reliable alert escalation
+    DEBUG branch: extensive logging at every phase.
     """
+    import time as _time
+    _t0 = _time.time()
+    debug_phases = {}  # timing and info for each phase
+
     try:
+        # ---- PHASE 1: Check YOLO availability ----
+        logger.info(f"[DEBUG-DETECT] ===== NEW DETECTION REQUEST =====")
+        logger.info(f"[DEBUG-DETECT] YOLO_AVAILABLE={YOLO_AVAILABLE}, ENABLE_VISION_AI={ENABLE_VISION_AI}")
+        logger.info(f"[DEBUG-DETECT] CV2_AVAILABLE={CV2_AVAILABLE}, numpy={np is not None}")
+        logger.info(f"[DEBUG-DETECT] user_id={request.user_id}, session_id={request.session_id}")
+        logger.info(f"[DEBUG-DETECT] image_base64 length={len(request.image_base64) if request.image_base64 else 0}")
+        debug_phases['yolo_available'] = YOLO_AVAILABLE
+        debug_phases['enable_vision_ai'] = ENABLE_VISION_AI
+        debug_phases['cv2_available'] = CV2_AVAILABLE
+
         if not YOLO_AVAILABLE:
-            # Fallback when YOLO unavailable
+            logger.error(f"[DEBUG-DETECT] YOLO NOT AVAILABLE - returning fallback. "
+                        f"Set ENABLE_VISION_AI=1 env var and install cv2+numpy+ultralytics")
             message, risk = FailSafeManager.get_fallback_response("model_unavailable")
             return ObstacleDetectionResponse(
                 obstacles=[],
                 safe_direction="forward",
                 warning_level=risk.value,
-                audio_message=message
+                audio_message=message,
+                debug_info={"error": "YOLO_NOT_AVAILABLE", "phases": debug_phases}
             )
 
-        # Decode image
+        # ---- PHASE 2: Decode image ----
+        _t1 = _time.time()
+        logger.info("[DEBUG-DETECT] Phase 2: Decoding base64 image...")
         frame = decode_base64_image(request.image_base64)
+        debug_phases['decode_time_ms'] = round((_time.time() - _t1) * 1000, 1)
         if frame is None:
+            logger.error("[DEBUG-DETECT] Phase 2 FAILED: decode returned None")
             message, risk = FailSafeManager.get_fallback_response("image_invalid")
             return ObstacleDetectionResponse(
                 obstacles=[],
                 safe_direction="stop",
                 warning_level=risk.value,
-                audio_message=message
+                audio_message=message,
+                debug_info={"error": "IMAGE_DECODE_FAILED", "phases": debug_phases}
             )
+        logger.info(f"[DEBUG-DETECT] Phase 2 OK: frame shape={frame.shape}")
+        debug_phases['frame_shape'] = list(frame.shape)
 
-        # Resize frame for faster inference (cap at 480px)
+        # ---- PHASE 3: Resize for inference ----
+        _t2 = _time.time()
         orig_h, orig_w = frame.shape[:2]
         MAX_DIM = 480
         if max(orig_h, orig_w) > MAX_DIM:
@@ -675,22 +801,33 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
             new_w = int(orig_w * scale)
             new_h = int(orig_h * scale)
             inference_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            logger.debug(f"Resized {orig_w}x{orig_h} -> {new_w}x{new_h} for inference")
+            logger.info(f"[DEBUG-DETECT] Phase 3: Resized {orig_w}x{orig_h} -> {new_w}x{new_h}")
         else:
             inference_frame = frame
+            logger.info(f"[DEBUG-DETECT] Phase 3: No resize needed, using {orig_w}x{orig_h}")
+        debug_phases['resize_time_ms'] = round((_time.time() - _t2) * 1000, 1)
+        debug_phases['inference_frame_shape'] = list(inference_frame.shape)
 
-        # Load YOLO model
+        # ---- PHASE 4: Load YOLO model ----
+        _t3 = _time.time()
+        logger.info("[DEBUG-DETECT] Phase 4: Loading YOLO model...")
         model = get_yolo_model()
+        debug_phases['model_load_time_ms'] = round((_time.time() - _t3) * 1000, 1)
         if model is None:
+            logger.error("[DEBUG-DETECT] Phase 4 FAILED: model is None")
             message, risk = FailSafeManager.get_fallback_response("model_unavailable")
             return ObstacleDetectionResponse(
                 obstacles=[],
                 safe_direction="forward",
                 warning_level=risk.value,
-                audio_message=message
+                audio_message=message,
+                debug_info={"error": "MODEL_LOAD_FAILED", "phases": debug_phases}
             )
+        logger.info(f"[DEBUG-DETECT] Phase 4 OK: model type={type(model).__name__}")
 
-        # Run inference asynchronously
+        # ---- PHASE 5: Run YOLO inference ----
+        _t4 = _time.time()
+        logger.info(f"[DEBUG-DETECT] Phase 5: Running YOLO inference (conf={YOLO_CONF_THRESHOLD}, imgsz=320)...")
         try:
             yolo_results = await asyncio.wait_for(
                 run_blocking(
@@ -700,35 +837,58 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                     verbose=False,
                     imgsz=320
                 ),
-                timeout=8.0  # 8 second timeout
+                timeout=8.0
             )
         except asyncio.TimeoutError:
+            logger.error("[DEBUG-DETECT] Phase 5 FAILED: inference timeout (>8s)")
+            debug_phases['inference_timeout'] = True
             message, risk = FailSafeManager.get_fallback_response("inference_timeout")
             return ObstacleDetectionResponse(
                 obstacles=[],
                 safe_direction="forward",
                 warning_level=risk.value,
-                audio_message=message
+                audio_message=message,
+                debug_info={"error": "INFERENCE_TIMEOUT", "phases": debug_phases}
             )
+        debug_phases['inference_time_ms'] = round((_time.time() - _t4) * 1000, 1)
+        logger.info(f"[DEBUG-DETECT] Phase 5 OK: inference took {debug_phases['inference_time_ms']}ms")
 
-        # Parse YOLO results
+        # ---- PHASE 6: Parse YOLO results ----
+        _t5 = _time.time()
         result_obj = yolo_results[0]
         class_names = result_obj.names
-        # Use inference_frame dimensions (YOLO box coords are relative to this)
         frame_height, frame_width = inference_frame.shape[:2]
         frame_area = float(frame_width * frame_height)
+        
+        total_boxes = len(result_obj.boxes) if result_obj.boxes is not None else 0
+        logger.info(f"[DEBUG-DETECT] Phase 6: YOLO returned {total_boxes} total boxes")
+        logger.info(f"[DEBUG-DETECT] Phase 6: Available classes: {class_names}")
 
-        # Convert YOLO detections to RawDetection objects
+        # Log ALL raw YOLO detections (before filtering)
+        all_yolo_detections = []  # for debug
         raw_detections = []
         if result_obj.boxes is not None:
-            for box in result_obj.boxes:
+            for idx, box in enumerate(result_obj.boxes):
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 cls_id = int(box.cls[0].item())
                 confidence = float(box.conf[0].item())
                 class_name = class_names.get(cls_id, str(cls_id))
 
+                all_yolo_detections.append({
+                    "idx": idx,
+                    "class_name": class_name,
+                    "class_id": cls_id,
+                    "confidence": round(confidence, 4),
+                    "bbox_px": [round(x1,1), round(y1,1), round(x2,1), round(y2,1)],
+                    "is_mobility_relevant": class_name in MOBILITY_RELEVANT_CLASSES
+                })
+                logger.info(f"[DEBUG-DETECT] Phase 6: Raw box #{idx}: class='{class_name}' (id={cls_id}) "
+                            f"conf={confidence:.4f} bbox=({x1:.1f},{y1:.1f})-({x2:.1f},{y2:.1f}) "
+                            f"mobility_relevant={class_name in MOBILITY_RELEVANT_CLASSES}")
+
                 # Filter mobility-relevant classes only
                 if class_name not in MOBILITY_RELEVANT_CLASSES:
+                    logger.debug(f"[DEBUG-DETECT] Phase 6: FILTERED OUT '{class_name}' - not in MOBILITY_RELEVANT_CLASSES")
                     continue
 
                 # Normalize coordinates to 0-1
@@ -748,13 +908,21 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                     frame_height=frame_height
                 ))
 
-        # ---- PROXIMITY / WALL DETECTION (fills YOLO blind spot) ----
-        # When YOLO finds nothing or very little, analyze the raw image
-        # to detect walls, flat surfaces, and very close objects.
+        debug_phases['total_yolo_boxes'] = total_boxes
+        debug_phases['mobility_filtered_detections'] = len(raw_detections)
+        debug_phases['all_yolo_detections'] = all_yolo_detections
+        debug_phases['parse_time_ms'] = round((_time.time() - _t5) * 1000, 1)
+        logger.info(f"[DEBUG-DETECT] Phase 6 OK: {total_boxes} total -> {len(raw_detections)} mobility-relevant")
+
+        # ---- PHASE 7: PROXIMITY / WALL DETECTION (fills YOLO blind spot) ----
+        _t6 = _time.time()
+        logger.info("[DEBUG-DETECT] Phase 7: Running proximity/wall analysis...")
         proximity_result = analyze_scene_proximity(frame)
+        debug_phases['proximity_result'] = proximity_result
+        debug_phases['proximity_time_ms'] = round((_time.time() - _t6) * 1000, 1)
+        logger.info(f"[DEBUG-DETECT] Phase 7: proximity_result={proximity_result}")
+        
         if proximity_result["is_obstructed"] and len(raw_detections) <= 1:
-            # Inject a synthetic "wall/surface" detection so the pipeline
-            # treats it as a real obstacle.
             synthetic_confidence = min(0.90, proximity_result["obstruction_confidence"] + 0.25)
             reason = proximity_result["reason"]
             label_map = {
@@ -763,7 +931,6 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 "large_uniform_surface": "large surface",
             }
             synthetic_label = label_map.get(reason, "obstacle")
-            # Full-frame bounding box (normalized)
             raw_detections.append(RawDetection(
                 class_id=9999,
                 class_name=synthetic_label,
@@ -773,26 +940,44 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 frame_height=frame_height,
             ))
             logger.info(
-                f"Proximity detection injected: {synthetic_label} "
+                f"[DEBUG-DETECT] Phase 7: INJECTED synthetic detection: {synthetic_label} "
                 f"(conf={synthetic_confidence:.2f}, reason={reason})"
             )
+            debug_phases['synthetic_detection_injected'] = True
+            debug_phases['synthetic_label'] = synthetic_label
+        else:
+            logger.info(f"[DEBUG-DETECT] Phase 7: No synthetic detection needed (obstructed={proximity_result['is_obstructed']}, raw_dets={len(raw_detections)})")
+            debug_phases['synthetic_detection_injected'] = False
 
-        # Get session-specific pipeline
+        # ---- PHASE 8: Run robust pipeline ----
+        _t7 = _time.time()
         session_id = request.session_id or f"session_{request.user_id}"
         pipeline = get_session_pipeline(session_id)
+        logger.info(f"[DEBUG-DETECT] Phase 8: Processing through pipeline (session={session_id}, "
+                    f"frame_idx={pipeline.frame_index}, raw_dets={len(raw_detections)})")
 
-        # Process frame through robust pipeline
         detection_result = pipeline.process_frame(
             raw_detections=raw_detections,
             frame_width=frame_width,
             frame_height=frame_height
         )
+        debug_phases['pipeline_time_ms'] = round((_time.time() - _t7) * 1000, 1)
+        logger.info(f"[DEBUG-DETECT] Phase 8 OK: risk={detection_result.risk_level.value}, "
+                    f"tracked={len(detection_result.tracked_objects)}, "
+                    f"alert={detection_result.alert_triggered}, "
+                    f"safe_dir={detection_result.safe_direction}")
+        debug_phases['pipeline_debug'] = detection_result.debug_info
 
-        # Convert tracked objects to obstacle list format
+        # ---- PHASE 9: Convert tracked objects to obstacle list ----
+        logger.info("[DEBUG-DETECT] Phase 9: Converting tracked objects to obstacles...")
         obstacles = []
         for obj in detection_result.tracked_objects:
+            logger.debug(f"[DEBUG-DETECT] Phase 9: Object {obj.object_id}: class={obj.class_name}, "
+                        f"persistent={obj.is_persistent}, visibility={obj.visibility_streak}, "
+                        f"confidence={obj.smoothed_confidence:.3f}, motion={obj.motion_state.value}")
             if not obj.is_persistent:
-                continue  # Only report persistent objects
+                logger.debug(f"[DEBUG-DETECT] Phase 9: SKIPPED {obj.object_id} (not persistent)")
+                continue
 
             bbox = obj.bbox_history[-1]
             # bbox coords are already normalized 0-1, so area IS the ratio
@@ -819,17 +1004,35 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
             else:
                 direction = "right"
 
-            obstacles.append({
+            obstacle_entry = {
                 "type": obj.class_name,
                 "distance": distance,
                 "direction": direction,
                 "confidence": round(obj.smoothed_confidence, 3),
                 "moving": obj.motion_state.name.lower(),
                 "persistence_frames": obj.visibility_streak,
-                "object_id": obj.object_id  # For debugging
-            })
+                "object_id": obj.object_id
+            }
+            obstacles.append(obstacle_entry)
+            logger.info(f"[DEBUG-DETECT] Phase 9: ADDED obstacle: {obstacle_entry}")
 
-        # Log critical alert if triggered (non-blocking, don't fail detection on DB errors)
+        debug_phases['obstacles_count'] = len(obstacles)
+        logger.info(f"[DEBUG-DETECT] Phase 9 OK: {len(obstacles)} persistent obstacles reported")
+
+        # ---- PHASE 10: Draw debug bounding boxes ----
+        _t8 = _time.time()
+        logger.info("[DEBUG-DETECT] Phase 10: Drawing debug bounding boxes...")
+        annotated_b64 = draw_debug_boxes(
+            inference_frame,
+            raw_detections,
+            tracked_objects=detection_result.tracked_objects,
+            risk_level=detection_result.risk_level.value,
+            safe_direction=detection_result.safe_direction
+        )
+        debug_phases['draw_time_ms'] = round((_time.time() - _t8) * 1000, 1)
+        logger.info(f"[DEBUG-DETECT] Phase 10 OK: annotated image={'generated' if annotated_b64 else 'FAILED'}")
+
+        # Log critical alert if triggered
         if detection_result.alert_triggered and detection_result.risk_level in [RiskLevel.DANGER, RiskLevel.CRITICAL]:
             try:
                 alert = AlertHistoryCreate(
@@ -842,30 +1045,35 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 )
                 await create_alert(alert)
             except Exception as db_err:
-                logger.warning(f"Failed to log alert to DB: {db_err}")
+                logger.warning(f"[DEBUG-DETECT] Failed to log alert to DB: {db_err}")
 
-        # Add telemetry to response
+        # ---- PHASE 11: Build response ----
+        total_time_ms = round((_time.time() - _t0) * 1000, 1)
+        debug_phases['total_time_ms'] = total_time_ms
+        logger.info(f"[DEBUG-DETECT] Phase 11: Building response (total={total_time_ms}ms)")
+        logger.info(f"[DEBUG-DETECT] ===== DETECTION COMPLETE: risk={detection_result.risk_level.value}, "
+                    f"obstacles={len(obstacles)}, time={total_time_ms}ms =====")
+
         response = ObstacleDetectionResponse(
             obstacles=obstacles,
             safe_direction=detection_result.safe_direction,
             warning_level=detection_result.risk_level.value,
-            audio_message=detection_result.audio_message
+            audio_message=detection_result.audio_message,
+            debug_annotated_image=annotated_b64,
+            debug_info=debug_phases
         )
-
-        # Log debug info (optional, commented for production)
-        logger.debug(f"Frame {detection_result.frame_index}: {detection_result.debug_info}")
 
         return response
 
     except Exception as e:
-        logger.error(f"Obstacle detection pipeline error: {str(e)}", exc_info=True)
-        # Fail-safe: return conservative response
+        logger.error(f"[DEBUG-DETECT] UNHANDLED EXCEPTION in detection pipeline: {str(e)}", exc_info=True)
         message, risk = FailSafeManager.get_fallback_response("unknown_error")
         return ObstacleDetectionResponse(
             obstacles=[],
             safe_direction="stop",
             warning_level=risk.value,
-            audio_message=message
+            audio_message=message,
+            debug_info={"error": str(e), "error_type": type(e).__name__}
         )
 
 
