@@ -55,9 +55,20 @@ venv/
 
 # Model weights
 *.pt
+*.onnx
 
 # Build artifacts
 cloudflared.exe
+*.exe
+
+# Android build artifacts
+.gradle/
+*.keystore
+*.cxx/
+
+# Misc junk
+model.patch
+*.patch
 frontend/.metro-cache/
 frontend/android/app/build/
 frontend/android/app/.cxx/
