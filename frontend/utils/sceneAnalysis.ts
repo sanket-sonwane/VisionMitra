@@ -12,6 +12,13 @@ export interface ProximityResult {
   isObstructed: boolean;
   obstructionConfidence: number;
   reason: string;
+  metrics?: {
+    edgeDensity: number;
+    centerStdDev: number;
+    laplacianVariance: number;
+    dominantColorCoverage: number;
+    score: number;
+  };
 }
 
 /**
@@ -58,21 +65,38 @@ export function analyzeSceneProximity(
 
   // Aggregate
   const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const likelyWall = edgeDensity < 0.035 && stdDev < 28;
+  const likelyCloseObject = laplacianVar < 80;
+  const likelyUniformSurface = stdDev < 32 && maxCoverage > 0.34;
+  const obstructed = avgScore >= 0.42 || likelyWall || likelyCloseObject || likelyUniformSurface;
+  const metrics = {
+    edgeDensity: Math.round(edgeDensity * 10000) / 10000,
+    centerStdDev: Math.round(stdDev * 10) / 10,
+    laplacianVariance: Math.round(laplacianVar * 10) / 10,
+    dominantColorCoverage: Math.round(maxCoverage * 1000) / 1000,
+    score: Math.round(avgScore * 1000) / 1000,
+  };
 
-  if (avgScore >= 0.45) {
+  if (obstructed) {
     let reason: string;
-    if (edgeDensity < 0.02 && stdDev < 20) reason = "wall_or_flat_surface";
-    else if (laplacianVar < 50) reason = "very_close_object";
+    if (likelyWall || (edgeDensity < 0.025 && stdDev < 20)) reason = "wall_or_flat_surface";
+    else if (likelyCloseObject) reason = "very_close_object";
     else reason = "large_uniform_surface";
 
     return {
       isObstructed: true,
-      obstructionConfidence: Math.round(avgScore * 1000) / 1000,
+      obstructionConfidence: Math.max(0.45, Math.round(Math.max(avgScore, 0.45) * 1000) / 1000),
       reason,
+      metrics,
     };
   }
 
-  return { isObstructed: false, obstructionConfidence: 0, reason: "clear" };
+  return {
+    isObstructed: false,
+    obstructionConfidence: 0,
+    reason: "clear",
+    metrics,
+  };
 }
 
 // Convert RGBA pixel to grayscale
@@ -156,10 +180,12 @@ function computeCenterStdDev(
     const rowOff = y * width;
     for (let x = cx1; x < cx2; x += step) {
       const idx = (rowOff + x) * 4;
-      const g = (pixels[idx] * 77 + pixels[idx + 1] * 150 + pixels[idx + 2] * 29) >> 8;
-      sum += g;
-      sumSq += g * g;
-      count++;
+      const r = pixels[idx];
+      const g = pixels[idx + 1];
+      const b = pixels[idx + 2];
+      sum += r + g + b;
+      sumSq += r * r + g * g + b * b;
+      count += 3;
     }
   }
 

@@ -24,6 +24,7 @@ import {
 import {
   analyzeSceneProximity,
   proximitySyntheticDetection,
+  type ProximityResult,
 } from "./sceneAnalysis";
 
 // ==================== TYPES ====================
@@ -37,6 +38,7 @@ export interface LocalDetectionResult extends DetectionFrame {
     totalMs: number;
   };
   modelLoaded: boolean;
+  sceneAnalysis: ProximityResult;
 }
 
 type OnnxSession = {
@@ -257,7 +259,7 @@ export function clearPipeline(sessionId: string): void {
 
 // ==================== MAIN DETECTION FUNCTION ====================
 
-const CONF_THRESHOLD = 0.35;
+const CONF_THRESHOLD = 0.25;
 
 // Max resolution for scene analysis — larger images get downsampled
 const MAX_SCENE_WIDTH = 320;
@@ -374,7 +376,15 @@ export async function detectObstaclesLocal(
   const tScene = Date.now() - tScene0;
 
   // Inject synthetic detection if wall/surface detected and YOLO found ≤1 object
-  if (proximityResult.isObstructed && rawDetections.length <= 1) {
+  const hasLargeCentralDetection = rawDetections.some((det) => {
+    const widthNorm = Math.max(0, det.bbox.x2 - det.bbox.x1);
+    const heightNorm = Math.max(0, det.bbox.y2 - det.bbox.y1);
+    const areaNorm = widthNorm * heightNorm;
+    const centerX = (det.bbox.x1 + det.bbox.x2) / 2;
+    return areaNorm >= 0.18 && centerX >= 0.3 && centerX <= 0.7;
+  });
+
+  if (proximityResult.isObstructed && !hasLargeCentralDetection) {
     const synthetic = proximitySyntheticDetection(
       proximityResult,
       width,
@@ -410,6 +420,7 @@ export async function detectObstaclesLocal(
       totalMs,
     },
     modelLoaded,
+    sceneAnalysis: proximityResult,
   };
 }
 

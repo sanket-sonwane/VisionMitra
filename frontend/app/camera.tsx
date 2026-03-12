@@ -1,11 +1,12 @@
 import { StyleSheet, View, TouchableOpacity, Text, Alert, Platform, ScrollView, Image } from "react-native";
-import { CameraView, useCameraPermissions, CameraType } from "expo-camera";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { useState, useEffect, useRef } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import * as Location from "expo-location";
+import * as ImageManipulator from "expo-image-manipulator";
 import { useRouter } from "expo-router";
 import axios from "axios";
 import { useStore } from "@/store";
@@ -25,7 +26,7 @@ import {
   clearPipeline,
   type LocalDetectionResult,
 } from "@/utils/localDetection";
-import { decodeBase64ToPixels, getJpegDimensions } from "@/utils/imageUtils";
+import { decodeBase64ToPixels } from "@/utils/imageUtils";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const SEGMENT_COMPLETION_THRESHOLD = 50; // meters - consider segment complete when within this distance
@@ -51,6 +52,7 @@ export default function Camera() {
   const [showDebugImage, setShowDebugImage] = useState(false);
   const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [modelStatus, setModelStatus] = useState<string>("loading");
+  const [pictureSize, setPictureSize] = useState<string | undefined>(undefined);
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
   useEffect(() => {
@@ -92,6 +94,37 @@ export default function Camera() {
       startHeadingTracking();
     } else {
       Speech.speak("Camera mode. Tap analyze button to detect obstacles.");
+    }
+  };
+
+  const handleCameraReady = async () => {
+    if (!cameraRef.current?.getAvailablePictureSizes) return;
+
+    try {
+      const sizes: string[] = await cameraRef.current.getAvailablePictureSizes();
+      const parsed = sizes
+        .map((value) => {
+          const match = value.match(/^(\d+)x(\d+)$/);
+          if (!match) return null;
+          const width = Number(match[1]);
+          const height = Number(match[2]);
+          return { value, width, height, area: width * height };
+        })
+        .filter((item): item is { value: string; width: number; height: number; area: number } => Boolean(item))
+        .sort((a, b) => a.area - b.area);
+
+      if (parsed.length === 0) return;
+
+      const preferred =
+        parsed.find((size) => size.width >= 640 && size.height >= 480) ?? parsed[0];
+
+      setPictureSize((current) => {
+        if (current === preferred.value) return current;
+        console.log("[CAMERA] Using picture size:", preferred.value);
+        return preferred.value;
+      });
+    } catch (error) {
+      console.warn("[CAMERA] Failed to query picture sizes:", error);
     }
   };
 
@@ -200,21 +233,19 @@ export default function Camera() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
     if (nextSegmentIndex < totalSegments) {
-      // Move to next segment
-      try {
-        await axios.patch(
-          `${BACKEND_URL}/api/navigation-sessions/${currentSession.id}`,
-          null,
-          {
-            params: { current_segment_index: nextSegmentIndex },
-            timeout: 3000,
-          }
-        );
-      } catch (error) {
+      // Move to next segment - fire-and-forget backend update (non-blocking)
+      axios.patch(
+        `${BACKEND_URL}/api/navigation-sessions/${currentSession.id}`,
+        null,
+        {
+          params: { current_segment_index: nextSegmentIndex },
+          timeout: 3000,
+        }
+      ).catch((error) => {
         console.warn("Backend segment update failed (non-fatal):", error);
-      }
+      });
 
-      // Always update local session regardless of backend
+      // Update local session immediately (don't wait for backend)
       const updatedSession = {
         ...currentSession,
         current_segment_index: nextSegmentIndex,
@@ -232,18 +263,17 @@ export default function Camera() {
   const completeNavigation = async () => {
     if (!currentSession) return;
 
-    try {
-      await axios.patch(
-        `${BACKEND_URL}/api/navigation-sessions/${currentSession.id}`,
-        null,
-        {
-          params: { status: "completed" },
-          timeout: 3000,
-        }
-      );
-    } catch (error) {
+    // Fire-and-forget backend update (non-blocking)
+    axios.patch(
+      `${BACKEND_URL}/api/navigation-sessions/${currentSession.id}`,
+      null,
+      {
+        params: { status: "completed" },
+        timeout: 3000,
+      }
+    ).catch((error) => {
       console.warn("Backend navigation complete failed (non-fatal):", error);
-    }
+    });
 
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     Speech.speak("Navigation complete. You have arrived at your destination.");
@@ -290,24 +320,50 @@ export default function Camera() {
   const captureAndAnalyze = async () => {
     if (!cameraRef.current || isAnalyzing) return;
 
+    const totalStart = Date.now();
     try {
       setIsAnalyzing(true);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-
-      // Only announce on manual single-shot analysis, not continuous
+      // Skip haptics in continuous mode for speed
       if (!isContinuousRef.current) {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         Speech.speak("Analyzing surroundings...");
       }
 
-      // Capture photo at low quality for fast processing
+      // Capture a smaller frame with enough detail for YOLO.
+      const captureStart = Date.now();
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.2,
+        quality: 0.25,
         base64: true,
         skipProcessing: true,
+        exif: false,
       });
+      const captureTime = Date.now() - captureStart;
+      console.log(`[CAMERA] takePictureAsync: ${captureTime}ms`);
 
       if (!photo.base64) {
         throw new Error("Failed to capture image");
+      }
+
+      // Prefer the native-captured base64. If the frame is still too large,
+      // resize natively from the file URI before decoding in JS.
+      let imageBase64 = photo.base64;
+
+      const base64Length = photo.base64.length;
+      if (photo.uri && base64Length > 450000) {
+        try {
+          const resizeStart = Date.now();
+          const resized = await ImageManipulator.manipulateAsync(
+            photo.uri,
+            [{ resize: { width: 320 } }],
+            { format: ImageManipulator.SaveFormat.JPEG, base64: true, compress: 0.7 }
+          );
+          console.log(`[CAMERA] ImageManipulator resize: ${Date.now() - resizeStart}ms`);
+          if (resized.base64) {
+            imageBase64 = resized.base64;
+          }
+        } catch (resizeErr) {
+          console.warn("[CAMERA] Image resize failed, using original:", resizeErr);
+        }
       }
 
       let result: any = null;
@@ -316,7 +372,9 @@ export default function Camera() {
       // Scene analysis always runs locally.
       if (modelStatus === "ready") {
         // ====== FULL ON-DEVICE DETECTION (ONNX available) ======
-        const decoded = await decodeBase64ToPixels(photo.base64);
+        const decodeStart = Date.now();
+        const decoded = await decodeBase64ToPixels(imageBase64);
+        console.log(`[CAMERA] decodeBase64ToPixels: ${Date.now() - decodeStart}ms`);
         if (decoded) {
           const sessionId = currentSession?.id || "default";
           const localResult = await detectObstaclesLocal(
@@ -332,6 +390,9 @@ export default function Camera() {
               mode: "on-device",
               model_loaded: localResult.modelLoaded,
               timings: localResult.timings,
+              scene_reason: localResult.sceneAnalysis.reason,
+              scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
+              scene_metrics: localResult.sceneAnalysis.metrics,
               raw_detections_count: localResult.rawDetections.length,
               tracked_objects_count: localResult.trackedObjects.length,
               obstacles_count: localResult.obstacles.length,
@@ -341,12 +402,12 @@ export default function Camera() {
         }
       } else {
         // ====== HYBRID: Server YOLO + Local Scene Analysis ======
-        // Send frame to backend for YOLO detection
+        // Send frame to backend for YOLO detection (use resized image for faster upload)
         try {
           const serverResponse = await axios.post(
             `${BACKEND_URL}/api/detect-obstacles`,
             {
-              image_base64: photo.base64,
+              image_base64: imageBase64,
               user_id: userId || "anonymous",
               session_id: currentSession?.id || "default",
             },
@@ -359,7 +420,7 @@ export default function Camera() {
         } catch (serverErr: any) {
           // Server unreachable — fall back to local scene analysis only
           console.warn("[CAMERA] Server unreachable, using scene-only:", serverErr.message);
-          const decoded = await decodeBase64ToPixels(photo.base64);
+          const decoded = await decodeBase64ToPixels(imageBase64);
           if (decoded) {
             const sessionId = currentSession?.id || "default";
             const localResult = await detectObstaclesLocal(
@@ -375,6 +436,9 @@ export default function Camera() {
                 mode: "scene-only",
                 model_loaded: localResult.modelLoaded,
                 timings: localResult.timings,
+                scene_reason: localResult.sceneAnalysis.reason,
+                scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
+                scene_metrics: localResult.sceneAnalysis.metrics,
                 raw_detections_count: localResult.rawDetections.length,
                 tracked_objects_count: localResult.trackedObjects.length,
                 obstacles_count: localResult.obstacles.length,
@@ -390,29 +454,44 @@ export default function Camera() {
 
         if (showDebugInfo) {
           console.log('[DETECT] Mode:', result.debug_info?.mode);
+          console.log('[DETECT] Raw detections:', result.debug_info?.raw_detections_count ?? 0);
+          console.log('[DETECT] Scene:', result.debug_info?.scene_reason, result.debug_info?.scene_confidence, result.debug_info?.scene_metrics);
           console.log('[DETECT] Obstacles:', JSON.stringify(result.obstacles));
           console.log('[DETECT] Risk:', result.warning_level);
         }
 
         // Haptic feedback based on warning level
-        if (result.warning_level === "critical" || result.warning_level === "danger") {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        } else if (result.warning_level === "caution") {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-        } else {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        // Skip haptics in continuous mode for speed
+        if (!isContinuousRef.current) {
+          if (result.warning_level === "critical" || result.warning_level === "danger") {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          } else if (result.warning_level === "caution") {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          } else {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          }
         }
 
-        // Speak the audio message
+        // Speak the audio message (only critical/danger in continuous mode)
         if (result.audio_message) {
-          Speech.speak(result.audio_message, {
-            language: "en",
-            pitch: 1.0,
-            rate: 0.9,
-          });
+          const shouldSpeak = !isContinuousRef.current || 
+            result.warning_level === "critical" || 
+            result.warning_level === "danger";
+          if (shouldSpeak) {
+            Speech.speak(result.audio_message, {
+              language: "en",
+              pitch: 1.0,
+              rate: 1.1, // Slightly faster
+            });
+          }
         }
+        
+        // Log total time
+        console.log(`[CAMERA] Total captureAndAnalyze: ${Date.now() - totalStart}ms`);
       } else {
-        Speech.speak("Unable to analyze image. Proceed with caution.");
+        if (!isContinuousRef.current) {
+          Speech.speak("Unable to analyze image. Proceed with caution.");
+        }
         setLastAnalysis({
           warning_level: "caution",
           audio_message: "Unable to analyze image. Proceed with caution.",
@@ -434,12 +513,27 @@ export default function Camera() {
     Speech.speak("Continuous monitoring started");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
-    // Use sequential analysis: fire next as soon as current completes
+    // Frame counter for timing
+    let frameCount = 0;
+    let loopStartTime = Date.now();
+
+    // Optimized loop: minimal gap, track FPS
     const runLoop = async () => {
       while (isContinuousRef.current) {
+        const frameStart = Date.now();
         await captureAndAnalyze();
-        // Small gap between analyses to prevent overload
-        await new Promise(r => setTimeout(r, 300));
+        frameCount++;
+        const frameTime = Date.now() - frameStart;
+        
+        // Log FPS every 5 frames
+        if (frameCount % 5 === 0) {
+          const elapsed = (Date.now() - loopStartTime) / 1000;
+          const fps = frameCount / elapsed;
+          console.log(`[CONTINUOUS] Frame ${frameCount}: ${frameTime}ms, Avg FPS: ${fps.toFixed(2)}`);
+        }
+
+        // Minimal gap - just yield to allow UI updates
+        await new Promise(r => setTimeout(r, 50));
       }
     };
     runLoop();
@@ -494,6 +588,8 @@ export default function Camera() {
           style={styles.camera}
           ref={cameraRef}
           facing="back"
+          pictureSize={pictureSize}
+          onCameraReady={handleCameraReady}
         />
 
         {currentSegment && (

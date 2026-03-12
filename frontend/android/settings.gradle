@@ -36,4 +36,9 @@ rootProject.name = 'Eye Guide'
 expoAutolinking.useExpoVersionCatalog()
 
 include ':app'
+
+// Manually include onnxruntime-react-native (required for JSI native module)
+include ':onnxruntime-react-native'
+project(':onnxruntime-react-native').projectDir = new File(rootProject.projectDir, '../node_modules/onnxruntime-react-native/android')
+
 includeBuild(expoAutolinking.reactNativeGradlePlugin)

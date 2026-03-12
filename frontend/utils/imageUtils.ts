@@ -13,9 +13,14 @@ if (typeof globalThis.Buffer === "undefined") {
   (globalThis as any).Buffer = Buffer;
 }
 
+// Target size for detection - YOLO uses 320x320, keep small for speed
+const TARGET_WIDTH = 320;
+const TARGET_HEIGHT = 320;
+
 /**
  * Decode a base64 JPEG image to RGBA pixel data.
  * Uses jpeg-js for proper JPEG decoding on React Native.
+ * Automatically downsamples large images during decode to save memory.
  *
  * @param base64 - Base64 encoded JPEG string (without data URI prefix)
  * @returns RGBA pixel data, actual width, actual height
@@ -24,45 +29,57 @@ export async function decodeBase64ToPixels(
   base64: string
 ): Promise<{ pixels: Uint8Array; width: number; height: number } | null> {
   try {
-    // Attempt 1: Try react-native-skia for fastest pixel access
-    try {
-      const Skia = require("@shopify/react-native-skia");
-      const data = Skia.Skia.Data.fromBase64(base64);
-      const image = Skia.Skia.Image.MakeImageFromEncoded(data);
-      if (image) {
-        const w = image.width();
-        const h = image.height();
-        const pixels = image.readPixels(0, 0, {
-          width: w,
-          height: h,
-          colorType: 4, // RGBA_8888
-          alphaType: 1, // Unpremul
-        });
-        if (pixels) {
-          return { pixels: new Uint8Array(pixels), width: w, height: h };
+    // Buffer.from is substantially faster than atob + manual byte copying on Hermes.
+    const bytes = Buffer.from(base64, "base64");
+
+    // Check dimensions from JPEG header
+    const dims = parseJpegDimensions(bytes);
+    
+    // Calculate downscale factor if image is too large
+    // jpeg-js doesn't support scaling, so we'll decode then downsample
+    // But we can avoid decoding huge images entirely
+    if (dims && (dims.width > 2000 || dims.height > 2000)) {
+      // Image is very large - use expo-image-manipulator if available
+      try {
+        const { manipulateAsync, SaveFormat } = require("expo-image-manipulator");
+        const dataUri = `data:image/jpeg;base64,${base64}`;
+        const result = await manipulateAsync(
+          dataUri,
+          [{ resize: { width: TARGET_WIDTH } }],
+          { format: SaveFormat.JPEG, base64: true }
+        );
+        if (result.base64) {
+          // Recursively decode the resized image
+          return decodeBase64ToPixels(result.base64);
         }
+      } catch {
+        // expo-image-manipulator not available, continue with jpeg-js
       }
-    } catch {
-      // Skia not available — fall through to jpeg-js
     }
 
-    // Attempt 2: Use jpeg-js for proper JPEG decoding (pure JS)
-    const binaryStr = atob(base64);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) {
-      bytes[i] = binaryStr.charCodeAt(i);
-    }
-
-    // Proper JPEG decode — returns real RGBA pixel data
+    // Decode with jpeg-js - increase memory limit substantially
+    // A 4000x3000 RGBA image = 48MB, plus decode overhead
     const decoded = jpegDecode(bytes, {
-      useTArray: true,   // return Uint8Array instead of Buffer
-      formatAsRGBA: true, // RGBA output
-      maxMemoryUsageInMB: 64,
+      useTArray: true,
+      formatAsRGBA: true,
+      maxMemoryUsageInMB: 256, // Increased from 64
     });
 
     if (!decoded || !decoded.data || decoded.width === 0) {
       console.warn("[IMAGE-UTIL] jpeg-js decode returned empty result");
       return null;
+    }
+
+    // If decoded image is still large, downsample it
+    if (decoded.width > TARGET_WIDTH || decoded.height > TARGET_HEIGHT) {
+      const downsampled = downsampleRGBA(
+        new Uint8Array(decoded.data),
+        decoded.width,
+        decoded.height,
+        TARGET_WIDTH,
+        TARGET_HEIGHT
+      );
+      return downsampled;
     }
 
     return {
@@ -74,6 +91,40 @@ export async function decodeBase64ToPixels(
     console.warn("[IMAGE-UTIL] Failed to decode image:", e);
     return null;
   }
+}
+
+/**
+ * Downsample RGBA pixel data to target dimensions.
+ * Uses nearest-neighbor for speed.
+ */
+function downsampleRGBA(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+  maxW: number,
+  maxH: number
+): { pixels: Uint8Array; width: number; height: number } {
+  // Maintain aspect ratio
+  const scale = Math.max(srcW / maxW, srcH / maxH);
+  const dstW = Math.floor(srcW / scale);
+  const dstH = Math.floor(srcH / scale);
+  
+  const dst = new Uint8Array(dstW * dstH * 4);
+  
+  for (let y = 0; y < dstH; y++) {
+    const srcY = Math.floor(y * scale);
+    for (let x = 0; x < dstW; x++) {
+      const srcX = Math.floor(x * scale);
+      const srcIdx = (srcY * srcW + srcX) * 4;
+      const dstIdx = (y * dstW + x) * 4;
+      dst[dstIdx] = src[srcIdx];
+      dst[dstIdx + 1] = src[srcIdx + 1];
+      dst[dstIdx + 2] = src[srcIdx + 2];
+      dst[dstIdx + 3] = src[srcIdx + 3];
+    }
+  }
+  
+  return { pixels: dst, width: dstW, height: dstH };
 }
 
 /**
@@ -119,11 +170,7 @@ export function getJpegDimensions(
   base64: string
 ): { width: number; height: number } | null {
   try {
-    const binaryStr = atob(base64);
-    const bytes = new Uint8Array(Math.min(binaryStr.length, 1024)); // Only need headers
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = binaryStr.charCodeAt(i);
-    }
+    const bytes = Buffer.from(base64, "base64").subarray(0, 2048);
     return parseJpegDimensions(bytes);
   } catch {
     return null;
