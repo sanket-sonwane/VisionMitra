@@ -22,4 +22,7 @@ config.cacheStores = [
 // Reduce the number of workers to decrease resource usage
 config.maxWorkers = 2;
 
+// Register .onnx as an asset extension so the YOLO model is bundled with the app
+config.resolver.assetExts = [...(config.resolver.assetExts || []), 'onnx'];
+
 module.exports = config;

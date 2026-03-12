@@ -19,6 +19,13 @@ import {
   type NavigationSegment,
   type Coordinates,
 } from "@/utils/journeyPlanner";
+import {
+  detectObstaclesLocal,
+  initDetectionService,
+  clearPipeline,
+  type LocalDetectionResult,
+} from "@/utils/localDetection";
+import { decodeBase64ToPixels, getJpegDimensions } from "@/utils/imageUtils";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const SEGMENT_COMPLETION_THRESHOLD = 50; // meters - consider segment complete when within this distance
@@ -43,11 +50,17 @@ export default function Camera() {
   const lastDirectionAnnounce = useRef<number>(0);
   const [showDebugImage, setShowDebugImage] = useState(false);
   const [showDebugInfo, setShowDebugInfo] = useState(false);
+  const [modelStatus, setModelStatus] = useState<string>("loading");
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
   useEffect(() => {
     requestLocationPermission();
     initializeNavigation();
+    // Preload the on-device YOLO model so first detection is fast
+    initDetectionService().then(({ modelLoaded, error }) => {
+      setModelStatus(modelLoaded ? "ready" : "scene-only");
+      if (!modelLoaded) console.warn("[CAMERA] ONNX model not loaded, using scene analysis:", error);
+    });
     
     return () => {
       if (analysisInterval.current) {
@@ -59,6 +72,7 @@ export default function Camera() {
       if (headingSubscription.current) {
         headingSubscription.current.remove();
       }
+      clearPipeline(currentSession?.id || "default");
       Speech.stop();
     };
   }, []);
@@ -285,9 +299,9 @@ export default function Camera() {
         Speech.speak("Analyzing surroundings...");
       }
 
-      // Capture photo
+      // Capture photo at low quality for fast processing
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.3,
+        quality: 0.2,
         base64: true,
         skipProcessing: true,
       });
@@ -296,41 +310,89 @@ export default function Camera() {
         throw new Error("Failed to capture image");
       }
 
-      // Get location
-      let location = null;
-      if (locationPermission) {
-        const loc = await Location.getCurrentPositionAsync({});
-        location = {
-          latitude: loc.coords.latitude,
-          longitude: loc.coords.longitude,
-        };
+      let result: any = null;
+
+      // Strategy: Try on-device first. If ONNX unavailable, use server for YOLO.
+      // Scene analysis always runs locally.
+      if (modelStatus === "ready") {
+        // ====== FULL ON-DEVICE DETECTION (ONNX available) ======
+        const decoded = await decodeBase64ToPixels(photo.base64);
+        if (decoded) {
+          const sessionId = currentSession?.id || "default";
+          const localResult = await detectObstaclesLocal(
+            decoded.pixels, decoded.width, decoded.height, sessionId
+          );
+          result = {
+            obstacles: localResult.obstacles,
+            safe_direction: localResult.safeDirection,
+            warning_level: localResult.riskLevel,
+            audio_message: localResult.audioMessage,
+            detection_coords: localResult.detectionCoords,
+            debug_info: showDebugInfo ? {
+              mode: "on-device",
+              model_loaded: localResult.modelLoaded,
+              timings: localResult.timings,
+              raw_detections_count: localResult.rawDetections.length,
+              tracked_objects_count: localResult.trackedObjects.length,
+              obstacles_count: localResult.obstacles.length,
+              frame_index: localResult.frameIndex,
+            } : null,
+          };
+        }
+      } else {
+        // ====== HYBRID: Server YOLO + Local Scene Analysis ======
+        // Send frame to backend for YOLO detection
+        try {
+          const serverResponse = await axios.post(
+            `${BACKEND_URL}/api/detect-obstacles`,
+            {
+              image_base64: photo.base64,
+              user_id: userId || "anonymous",
+              session_id: currentSession?.id || "default",
+            },
+            { timeout: 5000 }
+          );
+          result = serverResponse.data;
+          if (showDebugInfo) {
+            result.debug_info = { ...result.debug_info, mode: "server" };
+          }
+        } catch (serverErr: any) {
+          // Server unreachable — fall back to local scene analysis only
+          console.warn("[CAMERA] Server unreachable, using scene-only:", serverErr.message);
+          const decoded = await decodeBase64ToPixels(photo.base64);
+          if (decoded) {
+            const sessionId = currentSession?.id || "default";
+            const localResult = await detectObstaclesLocal(
+              decoded.pixels, decoded.width, decoded.height, sessionId
+            );
+            result = {
+              obstacles: localResult.obstacles,
+              safe_direction: localResult.safeDirection,
+              warning_level: localResult.riskLevel,
+              audio_message: localResult.audioMessage,
+              detection_coords: localResult.detectionCoords,
+              debug_info: showDebugInfo ? {
+                mode: "scene-only",
+                model_loaded: localResult.modelLoaded,
+                timings: localResult.timings,
+                raw_detections_count: localResult.rawDetections.length,
+                tracked_objects_count: localResult.trackedObjects.length,
+                obstacles_count: localResult.obstacles.length,
+                frame_index: localResult.frameIndex,
+              } : null,
+            };
+          }
+        }
       }
 
-      // Send to backend for analysis (only if online mode)
-      if (isOnlineMode) {
-        const response = await axios.post(`${BACKEND_URL}/api/detect-obstacles`, {
-          image_base64: photo.base64,
-          user_id: userId || "demo_user",
-          session_id: currentSession?.id,
-          latitude: location?.latitude,
-          longitude: location?.longitude,
-        }, {
-          timeout: 15000
-        });
-
-        const result = response.data;
+      if (result) {
         setLastAnalysis(result);
 
-        // Log debug info to console
-        if (result.debug_info) {
-          console.log('[DEBUG-DETECT] Response debug_info:', JSON.stringify(result.debug_info, null, 2));
+        if (showDebugInfo) {
+          console.log('[DETECT] Mode:', result.debug_info?.mode);
+          console.log('[DETECT] Obstacles:', JSON.stringify(result.obstacles));
+          console.log('[DETECT] Risk:', result.warning_level);
         }
-        if (result.debug_annotated_image) {
-          console.log('[DEBUG-DETECT] Annotated image received, length:', result.debug_annotated_image.length);
-        }
-        console.log('[DEBUG-DETECT] Obstacles:', JSON.stringify(result.obstacles, null, 2));
-        console.log('[DEBUG-DETECT] Warning level:', result.warning_level);
-        console.log('[DEBUG-DETECT] Audio message:', result.audio_message);
 
         // Haptic feedback based on warning level
         if (result.warning_level === "critical" || result.warning_level === "danger") {
@@ -342,17 +404,18 @@ export default function Camera() {
         }
 
         // Speak the audio message
-        Speech.speak(result.audio_message, {
-          language: "en",
-          pitch: 1.0,
-          rate: 0.9,
-        });
+        if (result.audio_message) {
+          Speech.speak(result.audio_message, {
+            language: "en",
+            pitch: 1.0,
+            rate: 0.9,
+          });
+        }
       } else {
-        // Offline mode - basic analysis
-        Speech.speak("Offline mode. Using basic detection. Please proceed with caution.");
+        Speech.speak("Unable to analyze image. Proceed with caution.");
         setLastAnalysis({
           warning_level: "caution",
-          audio_message: "Offline mode active. Limited obstacle detection."
+          audio_message: "Unable to analyze image. Proceed with caution.",
         });
       }
 
@@ -419,8 +482,10 @@ export default function Camera() {
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Live Navigation</Text>
         <View style={styles.modeIndicator}>
-          <View style={[styles.modeDot, { backgroundColor: isOnlineMode ? "#4CAF50" : "#FF9800" }]} />
-          <Text style={styles.modeText}>{isOnlineMode ? "Online" : "Offline"}</Text>
+          <View style={[styles.modeDot, { backgroundColor: modelStatus === "ready" ? "#4CAF50" : modelStatus === "scene-only" ? "#2196F3" : "#FF9800" }]} />
+          <Text style={styles.modeText}>
+            {modelStatus === "ready" ? "AI On-Device" : modelStatus === "scene-only" ? "Server + Scene" : "Loading..."}
+          </Text>
         </View>
       </View>
 
@@ -472,6 +537,33 @@ export default function Camera() {
             <TouchableOpacity style={styles.closeDebugButton} onPress={() => setShowDebugImage(false)}>
               <Ionicons name="close" size={24} color="#fff" />
             </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Client-side bounding box overlay from detection_coords */}
+        {lastAnalysis?.detection_coords && lastAnalysis.detection_coords.length > 0 && !showDebugImage && (
+          <View style={styles.bboxOverlay} pointerEvents="none">
+            {lastAnalysis.detection_coords.map((coord: any, idx: number) => {
+              const distColor = coord.distance === "immediate" ? "#FF0000" : coord.distance === "near" ? "#FF9800" : "#4CAF50";
+              return (
+                <View
+                  key={coord.object_id || idx}
+                  style={[styles.bboxRect, {
+                    left: `${coord.x1 * 100}%`,
+                    top: `${coord.y1 * 100}%`,
+                    width: `${(coord.x2 - coord.x1) * 100}%`,
+                    height: `${(coord.y2 - coord.y1) * 100}%`,
+                    borderColor: distColor,
+                  }]}
+                >
+                  <View style={[styles.bboxLabel, { backgroundColor: distColor }]}>
+                    <Text style={styles.bboxLabelText}>
+                      {coord.label} {coord.confidence} [{coord.distance}]
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
           </View>
         )}
 
@@ -559,56 +651,30 @@ export default function Camera() {
 
       {showDebugInfo && lastAnalysis?.debug_info && (
         <ScrollView style={styles.debugInfoPanel}>
-          <Text style={styles.debugInfoTitle}>Debug Telemetry</Text>
+          <Text style={styles.debugInfoTitle}>On-Device Detection Telemetry</Text>
           <Text style={styles.debugInfoText}>
-            YOLO available: {String(lastAnalysis.debug_info.yolo_available ?? 'N/A')}
+            YOLO model loaded: {String(lastAnalysis.debug_info.model_loaded ?? 'N/A')}
           </Text>
           <Text style={styles.debugInfoText}>
-            Total YOLO boxes: {lastAnalysis.debug_info.total_yolo_boxes ?? 'N/A'}
+            Raw detections: {lastAnalysis.debug_info.raw_detections_count ?? 'N/A'}
           </Text>
           <Text style={styles.debugInfoText}>
-            Mobility filtered: {lastAnalysis.debug_info.mobility_filtered_detections ?? 'N/A'}
+            Tracked objects: {lastAnalysis.debug_info.tracked_objects_count ?? 'N/A'}
           </Text>
           <Text style={styles.debugInfoText}>
             Obstacles reported: {lastAnalysis.debug_info.obstacles_count ?? 'N/A'}
           </Text>
           <Text style={styles.debugInfoText}>
-            Synthetic injected: {String(lastAnalysis.debug_info.synthetic_detection_injected ?? 'N/A')}
+            Frame #{lastAnalysis.debug_info.frame_index ?? '?'}
           </Text>
-          <Text style={styles.debugInfoText}>
-            Frame shape: {JSON.stringify(lastAnalysis.debug_info.frame_shape)}
-          </Text>
-          <Text style={styles.debugInfoText}>
-            Decode: {lastAnalysis.debug_info.decode_time_ms ?? '?'}ms | 
-            Inference: {lastAnalysis.debug_info.inference_time_ms ?? '?'}ms | 
-            Pipeline: {lastAnalysis.debug_info.pipeline_time_ms ?? '?'}ms | 
-            Total: {lastAnalysis.debug_info.total_time_ms ?? '?'}ms
-          </Text>
-          {lastAnalysis.debug_info.all_yolo_detections && (
-            <View>
-              <Text style={styles.debugInfoSubtitle}>All YOLO Detections (raw):</Text>
-              {lastAnalysis.debug_info.all_yolo_detections.map((det: any, idx: number) => (
-                <Text key={idx} style={styles.debugInfoDetection}>
-                  #{det.idx} {det.class_name} conf={det.confidence} mob={String(det.is_mobility_relevant)} bbox={JSON.stringify(det.bbox_px)}
-                </Text>
-              ))}
-            </View>
-          )}
-          {lastAnalysis.debug_info.pipeline_debug && (
-            <View>
-              <Text style={styles.debugInfoSubtitle}>Pipeline Debug:</Text>
-              <Text style={styles.debugInfoText}>
-                {JSON.stringify(lastAnalysis.debug_info.pipeline_debug, null, 2)}
-              </Text>
-            </View>
-          )}
-          {lastAnalysis.debug_info.proximity_result && (
-            <View>
-              <Text style={styles.debugInfoSubtitle}>Proximity Analysis:</Text>
-              <Text style={styles.debugInfoText}>
-                {JSON.stringify(lastAnalysis.debug_info.proximity_result, null, 2)}
-              </Text>
-            </View>
+          {lastAnalysis.debug_info.timings && (
+            <Text style={styles.debugInfoText}>
+              Preprocess: {lastAnalysis.debug_info.timings.preprocessMs ?? '?'}ms | 
+              Inference: {lastAnalysis.debug_info.timings.inferenceMs ?? '?'}ms | 
+              Scene: {lastAnalysis.debug_info.timings.sceneAnalysisMs ?? '?'}ms | 
+              Pipeline: {lastAnalysis.debug_info.timings.pipelineMs ?? '?'}ms | 
+              Total: {lastAnalysis.debug_info.timings.totalMs ?? '?'}ms
+            </Text>
           )}
         </ScrollView>
       )}
@@ -844,6 +910,32 @@ const styles = StyleSheet.create({
     backgroundColor: "#F44336",
     borderRadius: 20,
     padding: 8,
+  },
+  bboxOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 5,
+  },
+  bboxRect: {
+    position: "absolute",
+    borderWidth: 2,
+    borderStyle: "solid",
+  },
+  bboxLabel: {
+    position: "absolute",
+    top: -18,
+    left: 0,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 2,
+  },
+  bboxLabelText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "bold",
   },
   debugToggleRow: {
     flexDirection: "row",

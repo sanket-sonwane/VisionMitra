@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "Eye Guide",
-    "slug": "eye-guide",
+    "name": "VisionMitra",
+    "slug": "VisionMitra",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "eyeguide",
+    "scheme": "visionmitra",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
@@ -32,8 +32,30 @@
         "ACCESS_BACKGROUND_LOCATION",
         "RECORD_AUDIO",
         "VIBRATE",
-        "CALL_PHONE"
-      ]
+        "CALL_PHONE",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "RECORD_AUDIO",
+        "VIBRATE",
+        "CALL_PHONE",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION"
+      ],
+      "package": "com.anonymous.eyeguide"
     },
     "web": {
       "bundler": "metro",
@@ -42,6 +64,7 @@
     },
     "plugins": [
       "expo-router",
+      "onnxruntime-react-native",
       [
         "expo-splash-screen",
         {
@@ -65,7 +88,8 @@
           "locationWhenInUsePermission": "Guide you to destinations",
           "isAndroidBackgroundLocationEnabled": true
         }
-      ]
+      ],
+      "onnxruntime-react-native"
     ],
     "experiments": {
       "typedRoutes": true

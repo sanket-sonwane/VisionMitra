@@ -1,4 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, File, UploadFile
+from fastapi.responses import ORJSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -87,13 +89,14 @@ def clear_session_pipeline(session_id: str):
             del _session_pipelines[session_id]
             logger.info(f"Cleared pipeline for session {session_id}")
 
-# Configure logging - DEBUG level for detection-debug branch
+# Logging: WARNING by default for performance; set LOG_LEVEL=DEBUG for debug branch
+_log_level = os.environ.get('LOG_LEVEL', 'WARNING').upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, _log_level, logging.WARNING),
     format='%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] %(message)s'
 )
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(getattr(logging, _log_level, logging.WARNING))
 
 # ==================== MODELS ====================
 
@@ -185,14 +188,17 @@ class ObstacleDetectionRequest(BaseModel):
     session_id: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    include_debug_image: bool = False   # opt-in: send back annotated image
+    include_debug_info: bool = False    # opt-in: send back full debug telemetry
 
 class ObstacleDetectionResponse(BaseModel):
     obstacles: List[dict]
     safe_direction: Optional[str] = None
     warning_level: str  # safe, caution, danger, critical
     audio_message: str
-    debug_annotated_image: Optional[str] = None  # base64 annotated image with boxes
-    debug_info: Optional[dict] = None  # detailed debug telemetry
+    detection_coords: Optional[List[dict]] = None  # lightweight bbox coords for client-side drawing
+    debug_annotated_image: Optional[str] = None  # base64 annotated image with boxes (opt-in)
+    debug_info: Optional[dict] = None  # detailed debug telemetry (opt-in)
 
 class EmergencyAlert(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -741,56 +747,52 @@ MOBILITY_RELEVANT_CLASSES = {
     "surfboard", "bottle", "cup", "vase", "scissors", "book", "clock",
 }
 
-@api_router.post("/detect-obstacles", response_model=ObstacleDetectionResponse)
+@api_router.post("/detect-obstacles")
 async def detect_obstacles(request: ObstacleDetectionRequest):
     """
     Production-grade obstacle detection with temporal consistency.
-    DEBUG branch: extensive logging at every phase.
+    Opt-in debug: set include_debug_image / include_debug_info in request.
     """
     import time as _time
     _t0 = _time.time()
-    debug_phases = {}  # timing and info for each phase
+    debug_phases = {} if request.include_debug_info else None
 
     try:
         # ---- PHASE 1: Check YOLO availability ----
-        logger.info(f"[DEBUG-DETECT] ===== NEW DETECTION REQUEST =====")
-        logger.info(f"[DEBUG-DETECT] YOLO_AVAILABLE={YOLO_AVAILABLE}, ENABLE_VISION_AI={ENABLE_VISION_AI}")
-        logger.info(f"[DEBUG-DETECT] CV2_AVAILABLE={CV2_AVAILABLE}, numpy={np is not None}")
-        logger.info(f"[DEBUG-DETECT] user_id={request.user_id}, session_id={request.session_id}")
-        logger.info(f"[DEBUG-DETECT] image_base64 length={len(request.image_base64) if request.image_base64 else 0}")
-        debug_phases['yolo_available'] = YOLO_AVAILABLE
-        debug_phases['enable_vision_ai'] = ENABLE_VISION_AI
-        debug_phases['cv2_available'] = CV2_AVAILABLE
+        logger.debug(f"[DETECT] request user_id={request.user_id} image_len={len(request.image_base64) if request.image_base64 else 0}")
+        if debug_phases is not None:
+            debug_phases['yolo_available'] = YOLO_AVAILABLE
+            debug_phases['enable_vision_ai'] = ENABLE_VISION_AI
+            debug_phases['cv2_available'] = CV2_AVAILABLE
 
         if not YOLO_AVAILABLE:
-            logger.error(f"[DEBUG-DETECT] YOLO NOT AVAILABLE - returning fallback. "
-                        f"Set ENABLE_VISION_AI=1 env var and install cv2+numpy+ultralytics")
+            logger.warning("[DETECT] YOLO NOT AVAILABLE")
             message, risk = FailSafeManager.get_fallback_response("model_unavailable")
-            return ObstacleDetectionResponse(
-                obstacles=[],
-                safe_direction="forward",
-                warning_level=risk.value,
-                audio_message=message,
-                debug_info={"error": "YOLO_NOT_AVAILABLE", "phases": debug_phases}
-            )
+            return ORJSONResponse({
+                "obstacles": [],
+                "safe_direction": "forward",
+                "warning_level": risk.value,
+                "audio_message": message,
+                "debug_info": {"error": "YOLO_NOT_AVAILABLE"} if debug_phases is not None else None
+            })
 
         # ---- PHASE 2: Decode image ----
         _t1 = _time.time()
-        logger.info("[DEBUG-DETECT] Phase 2: Decoding base64 image...")
         frame = decode_base64_image(request.image_base64)
-        debug_phases['decode_time_ms'] = round((_time.time() - _t1) * 1000, 1)
+        if debug_phases is not None:
+            debug_phases['decode_time_ms'] = round((_time.time() - _t1) * 1000, 1)
         if frame is None:
-            logger.error("[DEBUG-DETECT] Phase 2 FAILED: decode returned None")
+            logger.warning("[DETECT] image decode failed")
             message, risk = FailSafeManager.get_fallback_response("image_invalid")
-            return ObstacleDetectionResponse(
-                obstacles=[],
-                safe_direction="stop",
-                warning_level=risk.value,
-                audio_message=message,
-                debug_info={"error": "IMAGE_DECODE_FAILED", "phases": debug_phases}
-            )
-        logger.info(f"[DEBUG-DETECT] Phase 2 OK: frame shape={frame.shape}")
-        debug_phases['frame_shape'] = list(frame.shape)
+            return ORJSONResponse({
+                "obstacles": [],
+                "safe_direction": "stop",
+                "warning_level": risk.value,
+                "audio_message": message,
+                "debug_info": {"error": "IMAGE_DECODE_FAILED"} if debug_phases is not None else None
+            })
+        if debug_phases is not None:
+            debug_phases['frame_shape'] = list(frame.shape)
 
         # ---- PHASE 3: Resize for inference ----
         _t2 = _time.time()
@@ -801,33 +803,30 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
             new_w = int(orig_w * scale)
             new_h = int(orig_h * scale)
             inference_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            logger.info(f"[DEBUG-DETECT] Phase 3: Resized {orig_w}x{orig_h} -> {new_w}x{new_h}")
         else:
             inference_frame = frame
-            logger.info(f"[DEBUG-DETECT] Phase 3: No resize needed, using {orig_w}x{orig_h}")
-        debug_phases['resize_time_ms'] = round((_time.time() - _t2) * 1000, 1)
-        debug_phases['inference_frame_shape'] = list(inference_frame.shape)
+        if debug_phases is not None:
+            debug_phases['resize_time_ms'] = round((_time.time() - _t2) * 1000, 1)
+            debug_phases['inference_frame_shape'] = list(inference_frame.shape)
 
         # ---- PHASE 4: Load YOLO model ----
         _t3 = _time.time()
-        logger.info("[DEBUG-DETECT] Phase 4: Loading YOLO model...")
         model = get_yolo_model()
-        debug_phases['model_load_time_ms'] = round((_time.time() - _t3) * 1000, 1)
+        if debug_phases is not None:
+            debug_phases['model_load_time_ms'] = round((_time.time() - _t3) * 1000, 1)
         if model is None:
-            logger.error("[DEBUG-DETECT] Phase 4 FAILED: model is None")
+            logger.warning("[DETECT] model is None")
             message, risk = FailSafeManager.get_fallback_response("model_unavailable")
-            return ObstacleDetectionResponse(
-                obstacles=[],
-                safe_direction="forward",
-                warning_level=risk.value,
-                audio_message=message,
-                debug_info={"error": "MODEL_LOAD_FAILED", "phases": debug_phases}
-            )
-        logger.info(f"[DEBUG-DETECT] Phase 4 OK: model type={type(model).__name__}")
+            return ORJSONResponse({
+                "obstacles": [],
+                "safe_direction": "forward",
+                "warning_level": risk.value,
+                "audio_message": message,
+                "debug_info": {"error": "MODEL_LOAD_FAILED"} if debug_phases is not None else None
+            })
 
         # ---- PHASE 5: Run YOLO inference ----
         _t4 = _time.time()
-        logger.info(f"[DEBUG-DETECT] Phase 5: Running YOLO inference (conf={YOLO_CONF_THRESHOLD}, imgsz=320)...")
         try:
             yolo_results = await asyncio.wait_for(
                 run_blocking(
@@ -840,18 +839,19 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 timeout=8.0
             )
         except asyncio.TimeoutError:
-            logger.error("[DEBUG-DETECT] Phase 5 FAILED: inference timeout (>8s)")
-            debug_phases['inference_timeout'] = True
+            logger.warning("[DETECT] inference timeout (>8s)")
+            if debug_phases is not None:
+                debug_phases['inference_timeout'] = True
             message, risk = FailSafeManager.get_fallback_response("inference_timeout")
-            return ObstacleDetectionResponse(
-                obstacles=[],
-                safe_direction="forward",
-                warning_level=risk.value,
-                audio_message=message,
-                debug_info={"error": "INFERENCE_TIMEOUT", "phases": debug_phases}
-            )
-        debug_phases['inference_time_ms'] = round((_time.time() - _t4) * 1000, 1)
-        logger.info(f"[DEBUG-DETECT] Phase 5 OK: inference took {debug_phases['inference_time_ms']}ms")
+            return ORJSONResponse({
+                "obstacles": [],
+                "safe_direction": "forward",
+                "warning_level": risk.value,
+                "audio_message": message,
+                "debug_info": debug_phases
+            })
+        if debug_phases is not None:
+            debug_phases['inference_time_ms'] = round((_time.time() - _t4) * 1000, 1)
 
         # ---- PHASE 6: Parse YOLO results ----
         _t5 = _time.time()
@@ -861,11 +861,8 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
         frame_area = float(frame_width * frame_height)
         
         total_boxes = len(result_obj.boxes) if result_obj.boxes is not None else 0
-        logger.info(f"[DEBUG-DETECT] Phase 6: YOLO returned {total_boxes} total boxes")
-        logger.info(f"[DEBUG-DETECT] Phase 6: Available classes: {class_names}")
 
-        # Log ALL raw YOLO detections (before filtering)
-        all_yolo_detections = []  # for debug
+        all_yolo_detections = [] if debug_phases is not None else None
         raw_detections = []
         if result_obj.boxes is not None:
             for idx, box in enumerate(result_obj.boxes):
@@ -874,24 +871,19 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 confidence = float(box.conf[0].item())
                 class_name = class_names.get(cls_id, str(cls_id))
 
-                all_yolo_detections.append({
-                    "idx": idx,
-                    "class_name": class_name,
-                    "class_id": cls_id,
-                    "confidence": round(confidence, 4),
-                    "bbox_px": [round(x1,1), round(y1,1), round(x2,1), round(y2,1)],
-                    "is_mobility_relevant": class_name in MOBILITY_RELEVANT_CLASSES
-                })
-                logger.info(f"[DEBUG-DETECT] Phase 6: Raw box #{idx}: class='{class_name}' (id={cls_id}) "
-                            f"conf={confidence:.4f} bbox=({x1:.1f},{y1:.1f})-({x2:.1f},{y2:.1f}) "
-                            f"mobility_relevant={class_name in MOBILITY_RELEVANT_CLASSES}")
+                if all_yolo_detections is not None:
+                    all_yolo_detections.append({
+                        "idx": idx,
+                        "class_name": class_name,
+                        "class_id": cls_id,
+                        "confidence": round(confidence, 4),
+                        "bbox_px": [round(x1,1), round(y1,1), round(x2,1), round(y2,1)],
+                        "is_mobility_relevant": class_name in MOBILITY_RELEVANT_CLASSES
+                    })
 
-                # Filter mobility-relevant classes only
                 if class_name not in MOBILITY_RELEVANT_CLASSES:
-                    logger.debug(f"[DEBUG-DETECT] Phase 6: FILTERED OUT '{class_name}' - not in MOBILITY_RELEVANT_CLASSES")
                     continue
 
-                # Normalize coordinates to 0-1
                 bbox = BoundingBox(
                     x1=x1 / frame_width,
                     y1=y1 / frame_height,
@@ -908,19 +900,18 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                     frame_height=frame_height
                 ))
 
-        debug_phases['total_yolo_boxes'] = total_boxes
-        debug_phases['mobility_filtered_detections'] = len(raw_detections)
-        debug_phases['all_yolo_detections'] = all_yolo_detections
-        debug_phases['parse_time_ms'] = round((_time.time() - _t5) * 1000, 1)
-        logger.info(f"[DEBUG-DETECT] Phase 6 OK: {total_boxes} total -> {len(raw_detections)} mobility-relevant")
+        if debug_phases is not None:
+            debug_phases['total_yolo_boxes'] = total_boxes
+            debug_phases['mobility_filtered_detections'] = len(raw_detections)
+            debug_phases['all_yolo_detections'] = all_yolo_detections
+            debug_phases['parse_time_ms'] = round((_time.time() - _t5) * 1000, 1)
 
         # ---- PHASE 7: PROXIMITY / WALL DETECTION (fills YOLO blind spot) ----
         _t6 = _time.time()
-        logger.info("[DEBUG-DETECT] Phase 7: Running proximity/wall analysis...")
         proximity_result = analyze_scene_proximity(frame)
-        debug_phases['proximity_result'] = proximity_result
-        debug_phases['proximity_time_ms'] = round((_time.time() - _t6) * 1000, 1)
-        logger.info(f"[DEBUG-DETECT] Phase 7: proximity_result={proximity_result}")
+        if debug_phases is not None:
+            debug_phases['proximity_result'] = proximity_result
+            debug_phases['proximity_time_ms'] = round((_time.time() - _t6) * 1000, 1)
         
         if proximity_result["is_obstructed"] and len(raw_detections) <= 1:
             synthetic_confidence = min(0.90, proximity_result["obstruction_confidence"] + 0.25)
@@ -939,48 +930,35 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 frame_width=frame_width,
                 frame_height=frame_height,
             ))
-            logger.info(
-                f"[DEBUG-DETECT] Phase 7: INJECTED synthetic detection: {synthetic_label} "
-                f"(conf={synthetic_confidence:.2f}, reason={reason})"
-            )
-            debug_phases['synthetic_detection_injected'] = True
-            debug_phases['synthetic_label'] = synthetic_label
+            if debug_phases is not None:
+                debug_phases['synthetic_detection_injected'] = True
+                debug_phases['synthetic_label'] = synthetic_label
         else:
-            logger.info(f"[DEBUG-DETECT] Phase 7: No synthetic detection needed (obstructed={proximity_result['is_obstructed']}, raw_dets={len(raw_detections)})")
-            debug_phases['synthetic_detection_injected'] = False
+            if debug_phases is not None:
+                debug_phases['synthetic_detection_injected'] = False
 
         # ---- PHASE 8: Run robust pipeline ----
         _t7 = _time.time()
         session_id = request.session_id or f"session_{request.user_id}"
         pipeline = get_session_pipeline(session_id)
-        logger.info(f"[DEBUG-DETECT] Phase 8: Processing through pipeline (session={session_id}, "
-                    f"frame_idx={pipeline.frame_index}, raw_dets={len(raw_detections)})")
 
         detection_result = pipeline.process_frame(
             raw_detections=raw_detections,
             frame_width=frame_width,
             frame_height=frame_height
         )
-        debug_phases['pipeline_time_ms'] = round((_time.time() - _t7) * 1000, 1)
-        logger.info(f"[DEBUG-DETECT] Phase 8 OK: risk={detection_result.risk_level.value}, "
-                    f"tracked={len(detection_result.tracked_objects)}, "
-                    f"alert={detection_result.alert_triggered}, "
-                    f"safe_dir={detection_result.safe_direction}")
-        debug_phases['pipeline_debug'] = detection_result.debug_info
+        if debug_phases is not None:
+            debug_phases['pipeline_time_ms'] = round((_time.time() - _t7) * 1000, 1)
+            debug_phases['pipeline_debug'] = detection_result.debug_info
 
         # ---- PHASE 9: Convert tracked objects to obstacle list ----
-        logger.info("[DEBUG-DETECT] Phase 9: Converting tracked objects to obstacles...")
         obstacles = []
+        detection_coords = []  # lightweight bbox data for client-side drawing
         for obj in detection_result.tracked_objects:
-            logger.debug(f"[DEBUG-DETECT] Phase 9: Object {obj.object_id}: class={obj.class_name}, "
-                        f"persistent={obj.is_persistent}, visibility={obj.visibility_streak}, "
-                        f"confidence={obj.smoothed_confidence:.3f}, motion={obj.motion_state.value}")
             if not obj.is_persistent:
-                logger.debug(f"[DEBUG-DETECT] Phase 9: SKIPPED {obj.object_id} (not persistent)")
                 continue
 
             bbox = obj.bbox_history[-1]
-            # bbox coords are already normalized 0-1, so area IS the ratio
             area_ratio = bbox.area
 
             # Distance classification
@@ -1014,67 +992,82 @@ async def detect_obstacles(request: ObstacleDetectionRequest):
                 "object_id": obj.object_id
             }
             obstacles.append(obstacle_entry)
-            logger.info(f"[DEBUG-DETECT] Phase 9: ADDED obstacle: {obstacle_entry}")
 
-        debug_phases['obstacles_count'] = len(obstacles)
-        logger.info(f"[DEBUG-DETECT] Phase 9 OK: {len(obstacles)} persistent obstacles reported")
+            # Lightweight coords for client-side box rendering
+            detection_coords.append({
+                "x1": round(bbox.x1, 4),
+                "y1": round(bbox.y1, 4),
+                "x2": round(bbox.x2, 4),
+                "y2": round(bbox.y2, 4),
+                "label": obj.class_name,
+                "confidence": round(obj.smoothed_confidence, 2),
+                "distance": distance,
+                "object_id": obj.object_id
+            })
 
-        # ---- PHASE 10: Draw debug bounding boxes ----
-        _t8 = _time.time()
-        logger.info("[DEBUG-DETECT] Phase 10: Drawing debug bounding boxes...")
-        annotated_b64 = draw_debug_boxes(
-            inference_frame,
-            raw_detections,
-            tracked_objects=detection_result.tracked_objects,
-            risk_level=detection_result.risk_level.value,
-            safe_direction=detection_result.safe_direction
-        )
-        debug_phases['draw_time_ms'] = round((_time.time() - _t8) * 1000, 1)
-        logger.info(f"[DEBUG-DETECT] Phase 10 OK: annotated image={'generated' if annotated_b64 else 'FAILED'}")
+        if debug_phases is not None:
+            debug_phases['obstacles_count'] = len(obstacles)
 
-        # Log critical alert if triggered
-        if detection_result.alert_triggered and detection_result.risk_level in [RiskLevel.DANGER, RiskLevel.CRITICAL]:
-            try:
-                alert = AlertHistoryCreate(
-                    user_id=request.user_id,
-                    session_id=session_id,
-                    alert_type="obstacle",
-                    message=detection_result.audio_message,
-                    location={"latitude": request.latitude, "longitude": request.longitude} if request.latitude else None,
-                    priority=detection_result.risk_level.value
-                )
-                await create_alert(alert)
-            except Exception as db_err:
-                logger.warning(f"[DEBUG-DETECT] Failed to log alert to DB: {db_err}")
+        # ---- PHASE 10: Draw debug bounding boxes (only if requested) ----
+        annotated_b64 = None
+        if request.include_debug_image:
+            _t8 = _time.time()
+            annotated_b64 = draw_debug_boxes(
+                inference_frame,
+                raw_detections,
+                tracked_objects=detection_result.tracked_objects,
+                risk_level=detection_result.risk_level.value,
+                safe_direction=detection_result.safe_direction
+            )
+            if debug_phases is not None:
+                debug_phases['draw_time_ms'] = round((_time.time() - _t8) * 1000, 1)
 
-        # ---- PHASE 11: Build response ----
-        total_time_ms = round((_time.time() - _t0) * 1000, 1)
-        debug_phases['total_time_ms'] = total_time_ms
-        logger.info(f"[DEBUG-DETECT] Phase 11: Building response (total={total_time_ms}ms)")
-        logger.info(f"[DEBUG-DETECT] ===== DETECTION COMPLETE: risk={detection_result.risk_level.value}, "
-                    f"obstacles={len(obstacles)}, time={total_time_ms}ms =====")
+        # Log critical alert — REMOVED from detection path for performance.
+        # DB writes were slowing down the pipeline on mobile/WiFi.
+        # Alerts are now handled client-side. Backend logging is optional
+        # and can be done via a separate /api/alerts endpoint post-hoc.
+        # if detection_result.alert_triggered: ...  (disabled)
 
-        response = ObstacleDetectionResponse(
-            obstacles=obstacles,
-            safe_direction=detection_result.safe_direction,
-            warning_level=detection_result.risk_level.value,
-            audio_message=detection_result.audio_message,
-            debug_annotated_image=annotated_b64,
-            debug_info=debug_phases
-        )
+        # ---- PHASE 11: Build response (use ORJSONResponse to skip Pydantic re-validation) ----
+        if debug_phases is not None:
+            debug_phases['total_time_ms'] = round((_time.time() - _t0) * 1000, 1)
 
-        return response
+        return ORJSONResponse({
+            "obstacles": obstacles,
+            "safe_direction": detection_result.safe_direction,
+            "warning_level": detection_result.risk_level.value,
+            "audio_message": detection_result.audio_message,
+            "detection_coords": detection_coords,
+            "debug_annotated_image": annotated_b64,
+            "debug_info": debug_phases,
+        })
 
     except Exception as e:
-        logger.error(f"[DEBUG-DETECT] UNHANDLED EXCEPTION in detection pipeline: {str(e)}", exc_info=True)
+        logger.error(f"[DETECT] exception: {e}", exc_info=True)
         message, risk = FailSafeManager.get_fallback_response("unknown_error")
-        return ObstacleDetectionResponse(
-            obstacles=[],
-            safe_direction="stop",
-            warning_level=risk.value,
-            audio_message=message,
-            debug_info={"error": str(e), "error_type": type(e).__name__}
+        return ORJSONResponse({
+            "obstacles": [],
+            "safe_direction": "stop",
+            "warning_level": risk.value,
+            "audio_message": message,
+            "debug_info": {"error": str(e), "error_type": type(e).__name__} if request.include_debug_info else None,
+        })
+
+
+async def _log_alert_background(user_id, session_id, detection_result, latitude, longitude):
+    """Fire-and-forget alert logging to avoid blocking the detection response."""
+    try:
+        alert = AlertHistoryCreate(
+            user_id=user_id,
+            session_id=session_id,
+            alert_type="obstacle",
+            message=detection_result.audio_message,
+            location={"latitude": latitude, "longitude": longitude} if latitude else None,
+            priority=detection_result.risk_level.value
         )
+        await create_alert(alert)
+    except Exception as db_err:
+        logger.warning(f"[DETECT] alert DB write failed: {db_err}")
 
 
 # ==================== PIPELINE MANAGEMENT ====================
@@ -1237,6 +1230,7 @@ async def health_check():
 # Include router
 app.include_router(api_router)
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
