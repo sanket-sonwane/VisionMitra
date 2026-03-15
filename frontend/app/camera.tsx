@@ -10,6 +10,9 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { useRouter } from "expo-router";
 import axios from "axios";
 import { useStore } from "@/store";
+import { messages, type MessageKey } from "@/localization/messages";
+import { speechLanguageConfig } from "@/localization/speechConfig";
+import { translate } from "@/localization/translate";
 import {
   calculateDistance,
   calculateBearing,
@@ -30,6 +33,34 @@ import { decodeBase64ToPixels } from "@/utils/imageUtils";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const SEGMENT_COMPLETION_THRESHOLD = 50; // meters - consider segment complete when within this distance
+
+const ALERT_TEXT_TO_KEY: Array<{ pattern: RegExp; key: MessageKey }> = [
+  { pattern: /camera.*calibrating|calibrating/i, key: "CAMERA_CALIBRATING" },
+  { pattern: /obstacle blocking path|blocked/i, key: "OBSTACLE_BLOCKING" },
+  { pattern: /person ahead/i, key: "PERSON_AHEAD" },
+  { pattern: /danger/i, key: "DANGER_AHEAD" },
+  { pattern: /caution|side obstacle|possible obstacles/i, key: "CAUTION_OBSTACLE" },
+  { pattern: /crowd on the left/i, key: "CROWD_LEFT" },
+  { pattern: /crowd on the right/i, key: "CROWD_RIGHT" },
+  { pattern: /path clear|path looks clear|continue forward/i, key: "PATH_CLEAR" },
+  { pattern: /unable to analyze image/i, key: "ANALYSIS_UNAVAILABLE" },
+];
+
+const isMessageKey = (value: unknown): value is MessageKey =>
+  typeof value === "string" && value in messages;
+
+const resolveAlertMessageKey = (payload: any): MessageKey | null => {
+  if (isMessageKey(payload?.audio_message_key)) {
+    return payload.audio_message_key;
+  }
+
+  if (typeof payload?.audio_message !== "string") {
+    return null;
+  }
+
+  const match = ALERT_TEXT_TO_KEY.find((entry) => entry.pattern.test(payload.audio_message));
+  return match?.key ?? null;
+};
 
 export default function Camera() {
   const router = useRouter();
@@ -52,8 +83,27 @@ export default function Camera() {
   const [showDebugImage, setShowDebugImage] = useState(false);
   const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [modelStatus, setModelStatus] = useState<string>("loading");
-  const [pictureSize, setPictureSize] = useState<string | undefined>(undefined);
+  const [pictureSize, setPictureSize] = useState<string | undefined>("640x480");
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
+  const getSelectedLanguageCode = () => speechLanguageConfig[useStore.getState().language];
+
+  const speakKey = (messageKey: MessageKey, options?: Omit<Speech.SpeechOptions, "language">) => {
+    Speech.speak(translate(messageKey), {
+      language: getSelectedLanguageCode(),
+      pitch: 1.0,
+      rate: 1.0,
+      ...options,
+    });
+  };
+
+  const speakText = (text: string, options?: Omit<Speech.SpeechOptions, "language">) => {
+    Speech.speak(text, {
+      language: getSelectedLanguageCode(),
+      pitch: 1.0,
+      rate: 1.0,
+      ...options,
+    });
+  };
 
   useEffect(() => {
     requestLocationPermission();
@@ -88,12 +138,12 @@ export default function Camera() {
 
   const initializeNavigation = () => {
     if (currentSession?.journey_plan) {
-      Speech.speak("Segmented navigation active. Starting first segment.");
+      speakKey("SEGMENT_NAV_ACTIVE");
       updateCurrentSegment();
       startLocationTracking();
       startHeadingTracking();
     } else {
-      Speech.speak("Camera mode. Tap analyze button to detect obstacles.");
+      speakKey("CAMERA_MODE_READY");
     }
   };
 
@@ -102,9 +152,10 @@ export default function Camera() {
 
     try {
       const sizes: string[] = await cameraRef.current.getAvailablePictureSizes();
+      console.log("[CAMERA] Available picture sizes:", sizes);
       const parsed = sizes
         .map((value) => {
-          const match = value.match(/^(\d+)x(\d+)$/);
+          const match = value.match(/(\d+)x(\d+)/);
           if (!match) return null;
           const width = Number(match[1]);
           const height = Number(match[2]);
@@ -116,7 +167,9 @@ export default function Camera() {
       if (parsed.length === 0) return;
 
       const preferred =
-        parsed.find((size) => size.width >= 640 && size.height >= 480) ?? parsed[0];
+        parsed.find((size) => size.width >= 640 && size.height >= 480 && size.width <= 1280) ??
+        parsed.find((size) => size.width >= 640 && size.height >= 480) ??
+        parsed[0];
 
       setPictureSize((current) => {
         if (current === preferred.value) return current;
@@ -137,10 +190,10 @@ export default function Camera() {
     if (segmentIndex < segments.length) {
       const segment = segments[segmentIndex];
       setCurrentSegment(segment);
-      Speech.speak(generateAudioInstruction(segment));
+      speakText(generateAudioInstruction(segment));
     } else {
       // Journey completed
-      Speech.speak("You have arrived at your destination!");
+      speakKey("DESTINATION_ARRIVED");
       completeNavigation();
     }
   };
@@ -199,7 +252,7 @@ export default function Camera() {
     const now = Date.now();
     if (currentSegment.type === "WALK" && dirText && now - lastDirectionAnnounce.current > 20000) {
       lastDirectionAnnounce.current = now;
-      Speech.speak(dirText);
+      speakText(dirText);
     }
   };
 
@@ -252,7 +305,7 @@ export default function Camera() {
       };
       setCurrentSession(updatedSession);
 
-      Speech.speak(`Segment complete. Starting next segment.`);
+      speakKey("SEGMENT_COMPLETE");
       setSegmentProgress(0);
     } else {
       // All segments complete
@@ -276,7 +329,7 @@ export default function Camera() {
     });
 
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    Speech.speak("Navigation complete. You have arrived at your destination.");
+    speakKey("NAVIGATION_COMPLETE");
     
     // Clear session
     setCurrentSession(null);
@@ -326,13 +379,13 @@ export default function Camera() {
       // Skip haptics in continuous mode for speed
       if (!isContinuousRef.current) {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        Speech.speak("Analyzing surroundings...");
+        speakKey("ANALYZING_SURROUNDINGS");
       }
 
       // Capture a smaller frame with enough detail for YOLO.
       const captureStart = Date.now();
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.25,
+        quality: 0.4,
         base64: true,
         skipProcessing: true,
         exif: false,
@@ -349,7 +402,10 @@ export default function Camera() {
       let imageBase64 = photo.base64;
 
       const base64Length = photo.base64.length;
-      if (photo.uri && base64Length > 450000) {
+      const forcedWidth = pictureSize ? Number((pictureSize.match(/(\d+)x(\d+)/) || [])[1]) : NaN;
+      const likelyLowRes = Number.isFinite(forcedWidth) && forcedWidth > 0 && forcedWidth <= 800;
+
+      if (photo.uri && base64Length > 1200000 && !likelyLowRes) {
         try {
           const resizeStart = Date.now();
           const resized = await ImageManipulator.manipulateAsync(
@@ -384,12 +440,19 @@ export default function Camera() {
             obstacles: localResult.obstacles,
             safe_direction: localResult.safeDirection,
             warning_level: localResult.riskLevel,
-            audio_message: localResult.audioMessage,
+            audio_message_key: localResult.audioMessageKey,
             detection_coords: localResult.detectionCoords,
             debug_info: showDebugInfo ? {
               mode: "on-device",
               model_loaded: localResult.modelLoaded,
               timings: localResult.timings,
+              calibration_state: localResult.calibrationState,
+              alert_priority: localResult.alertPriority,
+              lane_counters: localResult.laneCounters,
+              corridor_analysis_ms: localResult.corridorAnalysisMs,
+              corridor_overlay: __DEV__ ? localResult.corridorDebugOverlay : null,
+              frame_width: decoded.width,
+              frame_height: decoded.height,
               scene_reason: localResult.sceneAnalysis.reason,
               scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
               scene_metrics: localResult.sceneAnalysis.metrics,
@@ -430,12 +493,19 @@ export default function Camera() {
               obstacles: localResult.obstacles,
               safe_direction: localResult.safeDirection,
               warning_level: localResult.riskLevel,
-              audio_message: localResult.audioMessage,
+              audio_message_key: localResult.audioMessageKey,
               detection_coords: localResult.detectionCoords,
               debug_info: showDebugInfo ? {
                 mode: "scene-only",
                 model_loaded: localResult.modelLoaded,
                 timings: localResult.timings,
+                calibration_state: localResult.calibrationState,
+                alert_priority: localResult.alertPriority,
+                lane_counters: localResult.laneCounters,
+                corridor_analysis_ms: localResult.corridorAnalysisMs,
+                corridor_overlay: __DEV__ ? localResult.corridorDebugOverlay : null,
+                frame_width: decoded.width,
+                frame_height: decoded.height,
                 scene_reason: localResult.sceneAnalysis.reason,
                 scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
                 scene_metrics: localResult.sceneAnalysis.metrics,
@@ -450,6 +520,11 @@ export default function Camera() {
       }
 
       if (result) {
+        const resolvedMessageKey = resolveAlertMessageKey(result);
+        if (resolvedMessageKey) {
+          result.audio_message_key = resolvedMessageKey;
+        }
+
         setLastAnalysis(result);
 
         if (showDebugInfo) {
@@ -473,16 +548,19 @@ export default function Camera() {
         }
 
         // Speak the audio message (only critical/danger in continuous mode)
-        if (result.audio_message) {
+        if (result.audio_message_key || result.audio_message) {
+          const isCalibrationPrompt = result.audio_message_key === "CAMERA_CALIBRATING";
           const shouldSpeak = !isContinuousRef.current || 
             result.warning_level === "critical" || 
-            result.warning_level === "danger";
+            result.warning_level === "danger" ||
+            isCalibrationPrompt;
+
           if (shouldSpeak) {
-            Speech.speak(result.audio_message, {
-              language: "en",
-              pitch: 1.0,
-              rate: 1.1, // Slightly faster
-            });
+            if (result.audio_message_key) {
+              speakKey(result.audio_message_key, { rate: 1.1 });
+            } else if (typeof result.audio_message === "string") {
+              speakText(result.audio_message, { rate: 1.1 });
+            }
           }
         }
         
@@ -490,27 +568,90 @@ export default function Camera() {
         console.log(`[CAMERA] Total captureAndAnalyze: ${Date.now() - totalStart}ms`);
       } else {
         if (!isContinuousRef.current) {
-          Speech.speak("Unable to analyze image. Proceed with caution.");
+          speakKey("ANALYSIS_UNAVAILABLE");
         }
         setLastAnalysis({
           warning_level: "caution",
-          audio_message: "Unable to analyze image. Proceed with caution.",
+          audio_message_key: "ANALYSIS_UNAVAILABLE",
         });
       }
 
     } catch (error: any) {
       console.error("Analysis error:", error);
-      Speech.speak("Analysis failed. Please try again.");
+      speakKey("ANALYSIS_FAILED");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       setIsAnalyzing(false);
     }
   };
 
+  const renderCorridorDebugOverlay = () => {
+    if (!__DEV__ || !showDebugInfo) return null;
+
+    const overlay = lastAnalysis?.debug_info?.corridor_overlay;
+    const frameWidth = Number(lastAnalysis?.debug_info?.frame_width || 0);
+    const frameHeight = Number(lastAnalysis?.debug_info?.frame_height || 0);
+
+    if (!overlay || !frameWidth || !frameHeight) return null;
+
+    const dots: any[] = [];
+
+    const addSegmentDots = (
+      a: { x: number; y: number },
+      b: { x: number; y: number },
+      color: string,
+      keyPrefix: string
+    ) => {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      const steps = Math.max(1, Math.floor(length / 24));
+
+      for (let i = 0; i <= steps; i += 1) {
+        const t = i / steps;
+        const x = a.x + dx * t;
+        const y = a.y + dy * t;
+        dots.push(
+          <View
+            key={`${keyPrefix}_${i}`}
+            style={[
+              styles.corridorDebugDot,
+              {
+                left: `${(x / frameWidth) * 100}%`,
+                top: `${(y / frameHeight) * 100}%`,
+                backgroundColor: color,
+              },
+            ]}
+          />
+        );
+      }
+    };
+
+    const drawPolygon = (points: Array<{ x: number; y: number }>, color: string, keyPrefix: string) => {
+      if (!Array.isArray(points) || points.length < 2) return;
+      for (let i = 0; i < points.length; i += 1) {
+        const a = points[i];
+        const b = points[(i + 1) % points.length];
+        addSegmentDots(a, b, color, `${keyPrefix}_${i}`);
+      }
+    };
+
+    drawPolygon(overlay.roi || [], "#00E676", "roi");
+    drawPolygon(overlay.centerCorridor || [], "#4FC3F7", "center");
+
+    (overlay.gridRows || []).forEach((row: Array<{ x: number; y: number }>, idx: number) => {
+      if (row.length >= 2) {
+        addSegmentDots(row[0], row[1], "#FFD54F", `grid_${idx}`);
+      }
+    });
+
+    return <View style={styles.corridorDebugOverlay} pointerEvents="none">{dots}</View>;
+  };
+
   const startContinuousAnalysis = () => {
     setIsActive(true);
     isContinuousRef.current = true;
-    Speech.speak("Continuous monitoring started");
+    speakKey("CONTINUOUS_MONITORING_STARTED");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
     // Frame counter for timing
@@ -542,7 +683,7 @@ export default function Camera() {
   const stopContinuousAnalysis = () => {
     setIsActive(false);
     isContinuousRef.current = false;
-    Speech.speak("Continuous monitoring stopped");
+    speakKey("CONTINUOUS_MONITORING_STOPPED");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     
     if (analysisInterval.current) {
@@ -591,6 +732,18 @@ export default function Camera() {
           pictureSize={pictureSize}
           onCameraReady={handleCameraReady}
         />
+
+        <View style={styles.pathCorridorOverlay} pointerEvents="none">
+          <View style={styles.pathCorridorLabelWrap}>
+            <Text style={styles.pathCorridorLabel}>CENTER PATH</Text>
+          </View>
+          <View style={styles.pathCorridorFill} />
+          <View style={styles.pathCorridorLeft} />
+          <View style={styles.pathCorridorRight} />
+          <View style={styles.pathCorridorCenterLine} />
+        </View>
+
+        {renderCorridorDebugOverlay()}
 
         {currentSegment && (
           <View style={styles.segmentOverlay}>
@@ -700,7 +853,7 @@ export default function Camera() {
               style={[styles.analyzeButton, isAnalyzing && styles.analyzeButtonDisabled]}
               onPress={captureAndAnalyze}
               disabled={isAnalyzing}
-              onLongPress={() => Speech.speak("Analyze once. Takes a photo and analyzes obstacles.")}
+              onLongPress={() => speakKey("ANALYZE_ONCE_HINT")}
             >
               <Ionicons name="scan" size={32} color="#fff" />
               <Text style={styles.buttonText}>
@@ -711,7 +864,7 @@ export default function Camera() {
             <TouchableOpacity
               style={styles.continuousButton}
               onPress={startContinuousAnalysis}
-              onLongPress={() => Speech.speak("Start continuous monitoring. Analyzes every 3 seconds.")}
+              onLongPress={() => speakKey("START_MONITORING_HINT")}
             >
               <Ionicons name="play" size={32} color="#fff" />
               <Text style={styles.buttonText}>Start Monitoring</Text>
@@ -721,7 +874,7 @@ export default function Camera() {
           <TouchableOpacity
             style={styles.stopButton}
             onPress={stopContinuousAnalysis}
-            onLongPress={() => Speech.speak("Stop continuous monitoring")}
+            onLongPress={() => speakKey("STOP_MONITORING_HINT")}
           >
             <Ionicons name="stop" size={32} color="#fff" />
             <Text style={styles.buttonText}>Stop Monitoring</Text>
@@ -732,12 +885,16 @@ export default function Camera() {
       {lastAnalysis && (
         <View style={styles.resultContainer}>
           <Text style={styles.resultTitle}>Last Analysis:</Text>
-          <Text style={styles.resultMessage}>{lastAnalysis.audio_message}</Text>
+          <Text style={styles.resultMessage}>
+            {lastAnalysis.audio_message_key
+              ? translate(lastAnalysis.audio_message_key)
+              : lastAnalysis.audio_message}
+          </Text>
           {lastAnalysis.obstacles && lastAnalysis.obstacles.length > 0 && (
             <View style={styles.obstacleList}>
               {lastAnalysis.obstacles.map((obs: any, idx: number) => (
                 <Text key={idx} style={styles.obstacleItem}>
-                  {obs.type} • {obs.distance} • {obs.direction} • conf:{obs.confidence} • {obs.moving}
+                  {obs.type} • {obs.distance} • {obs.direction} • lane:{obs.lane ?? "n/a"} • conf:{obs.confidence} • {obs.moving}
                 </Text>
               ))}
             </View>
@@ -768,6 +925,7 @@ export default function Camera() {
               Preprocess: {lastAnalysis.debug_info.timings.preprocessMs ?? '?'}ms | 
               Inference: {lastAnalysis.debug_info.timings.inferenceMs ?? '?'}ms | 
               Scene: {lastAnalysis.debug_info.timings.sceneAnalysisMs ?? '?'}ms | 
+                Corridor: {lastAnalysis.debug_info.timings.corridorMs ?? '?'}ms | 
               Pipeline: {lastAnalysis.debug_info.timings.pipelineMs ?? '?'}ms | 
               Total: {lastAnalysis.debug_info.timings.totalMs ?? '?'}ms
             </Text>
@@ -782,6 +940,22 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#000",
+  },
+  corridorDebugOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 7,
+  },
+  corridorDebugDot: {
+    position: "absolute",
+    width: 3,
+    height: 3,
+    borderRadius: 2,
+    marginLeft: -1.5,
+    marginTop: -1.5,
   },
   header: {
     flexDirection: "row",
@@ -1014,6 +1188,71 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     zIndex: 5,
+  },
+  pathCorridorOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 6,
+    elevation: 6,
+    pointerEvents: "none",
+  },
+  pathCorridorLabelWrap: {
+    position: "absolute",
+    top: "20%",
+    left: 0,
+    right: 0,
+    alignItems: "center",
+  },
+  pathCorridorLabel: {
+    color: "#00E676",
+    fontSize: 11,
+    fontWeight: "800",
+    backgroundColor: "rgba(0, 0, 0, 0.65)",
+    borderColor: "rgba(0, 230, 118, 0.8)",
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    letterSpacing: 0.5,
+  },
+  pathCorridorFill: {
+    position: "absolute",
+    left: "30%",
+    right: "30%",
+    bottom: "12%",
+    top: "24%",
+    backgroundColor: "rgba(0, 230, 118, 0.14)",
+    borderWidth: 1.5,
+    borderColor: "rgba(0, 230, 118, 0.45)",
+    borderRadius: 10,
+  },
+  pathCorridorLeft: {
+    position: "absolute",
+    left: "28%",
+    bottom: "12%",
+    top: "24%",
+    width: 3,
+    backgroundColor: "rgba(0, 230, 118, 0.9)",
+  },
+  pathCorridorRight: {
+    position: "absolute",
+    right: "28%",
+    bottom: "12%",
+    top: "24%",
+    width: 3,
+    backgroundColor: "rgba(0, 230, 118, 0.9)",
+  },
+  pathCorridorCenterLine: {
+    position: "absolute",
+    left: "50%",
+    marginLeft: -1,
+    bottom: "12%",
+    top: "24%",
+    width: 2,
+    backgroundColor: "rgba(0, 230, 118, 0.55)",
   },
   bboxRect: {
     position: "absolute",

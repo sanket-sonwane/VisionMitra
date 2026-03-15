@@ -13,6 +13,19 @@
  * - Fail-safe fallback logic
  */
 
+import {
+  analyzeObstaclePosition,
+  buildCorridorDebugOverlay,
+  countLaneOccupancy,
+  getCrowdAwarenessMessages,
+  type CorridorDebugOverlay,
+  type CorridorLane,
+  type CorridorLaneCounters,
+  type CorridorObstacle,
+  type DistanceBucket,
+} from "@/navigation/corridorMapping";
+import type { MessageKey } from "@/localization/messages";
+
 // ==================== ENUMS ====================
 
 export enum MotionState {
@@ -28,6 +41,10 @@ export enum RiskLevel {
   DANGER = "danger",
   CRITICAL = "critical",
 }
+
+export type CalibrationState = "INIT" | "CALIBRATING" | "ACTIVE";
+
+export type AlertPriority = "critical" | "danger" | "caution" | "awareness";
 
 export enum AlertTriggerEvent {
   NEW_OBSTACLE = "new_obstacle",
@@ -142,11 +159,18 @@ function updateSmoothedConfidence(obj: TrackedObject): void {
   const largeArea =
     obj.bboxHistory.length > 0 &&
     bboxArea(obj.bboxHistory[obj.bboxHistory.length - 1]) >= 0.15;
-  const highConf = obj.smoothedConfidence >= 0.6;
+  const highConf = obj.smoothedConfidence >= 0.55;
+  const mediumConf = obj.smoothedConfidence >= 0.28;
+  const lastArea =
+    obj.bboxHistory.length > 0
+      ? bboxArea(obj.bboxHistory[obj.bboxHistory.length - 1])
+      : 0;
 
+  // More responsive persistence so first-frame obstacles are not hidden.
   obj.isPersistent =
-    (obj.visibilityStreak >= 2 && obj.smoothedConfidence >= 0.35) ||
-    (obj.visibilityStreak >= 1 && highConf && largeArea);
+    (obj.visibilityStreak >= 1 && mediumConf && lastArea >= 0.04) ||
+    (obj.visibilityStreak >= 2 && obj.smoothedConfidence >= 0.22) ||
+    (obj.visibilityStreak >= 1 && highConf && (largeArea || lastArea >= 0.015));
 }
 
 function classifyMotion(obj: TrackedObject): MotionState {
@@ -184,17 +208,23 @@ export interface DetectionFrame {
   trackedObjects: TrackedObject[];
   safeDirection: string;
   riskLevel: RiskLevel;
-  audioMessage: string;
+  audioMessageKey: MessageKey | "";
   alertTriggered: boolean;
   alertReason: AlertTriggerEvent | null;
   obstacles: ObstacleEntry[];
   detectionCoords: DetectionCoord[];
+  calibrationState: CalibrationState;
+  alertPriority: AlertPriority;
+  laneCounters: CorridorLaneCounters;
+  corridorAnalysisMs: number;
+  corridorDebugOverlay?: CorridorDebugOverlay;
 }
 
 export interface ObstacleEntry {
   type: string;
-  distance: string;
+  distance: DistanceBucket;
   direction: string;
+  lane: CorridorLane;
   confidence: number;
   moving: string;
   persistenceFrames: number;
@@ -208,7 +238,7 @@ export interface DetectionCoord {
   y2: number;
   label: string;
   confidence: number;
-  distance: string;
+  distance: DistanceBucket;
   objectId: string;
 }
 
@@ -217,7 +247,7 @@ export interface DetectionCoord {
 export class ObjectTracker {
   trackedObjects: Map<string, TrackedObject> = new Map();
   private nextObjectId = 0;
-  private decayThreshold = 5;
+  private decayThreshold = 2;
   private matchDistanceThreshold = 0.15;
   private matchSizeThreshold = 0.3;
 
@@ -290,6 +320,54 @@ function bboxDistance(a: BoundingBox, b: BoundingBox): number {
   return Math.sqrt((ca[0] - cb[0]) ** 2 + (ca[1] - cb[1]) ** 2);
 }
 
+interface CorridorTrackedObstacle extends CorridorObstacle {
+  objectId: string;
+  moving: MotionState;
+  persistenceFrames: number;
+  bbox: BoundingBox;
+  direction: string;
+}
+
+interface RiskContext {
+  centerImmediate: CorridorTrackedObstacle[];
+  centerNear: CorridorTrackedObstacle[];
+  sideNear: CorridorTrackedObstacle[];
+  laneCounters: CorridorLaneCounters;
+  awarenessMessages: MessageKey[];
+}
+
+const nowMs = (): number => {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+};
+
+function laneFromCenterX(centerX: number): string {
+  if (centerX < 0.25) return "left";
+  if (centerX < 0.42) return "front-left";
+  if (centerX <= 0.58) return "front";
+  if (centerX <= 0.75) return "front-right";
+  return "right";
+}
+
+function sidePressure(context: RiskContext, lane: "left" | "right"): number {
+  const sideNearLoad = context.sideNear.filter((item) => item.lane === lane).length;
+  const crowdLoad = lane === "left" ? context.laneCounters.leftLaneCount : context.laneCounters.rightLaneCount;
+  return sideNearLoad + crowdLoad;
+}
+
+function chooseSaferSide(context: RiskContext): "left" | "right" | "stop" {
+  const leftLoad = sidePressure(context, "left");
+  const rightLoad = sidePressure(context, "right");
+
+  if (leftLoad > 0 && rightLoad > 0 && Math.abs(leftLoad - rightLoad) <= 1) {
+    return "stop";
+  }
+
+  return leftLoad <= rightLoad ? "left" : "right";
+}
+
 // ==================== STABLE RISK DECISION ENGINE ====================
 
 export class StableRiskDecisionEngine {
@@ -303,89 +381,77 @@ export class StableRiskDecisionEngine {
   };
 
   evaluate(
-    trackedObjects: TrackedObject[]
-  ): { riskLevel: RiskLevel; safeDirection: string; shouldTrigger: boolean } {
-    const persistent = trackedObjects.filter((o) => o.isPersistent);
-    if (persistent.length === 0) {
+    corridorObstacles: CorridorTrackedObstacle[]
+  ): { riskLevel: RiskLevel; safeDirection: string; shouldTrigger: boolean; context: RiskContext } {
+    if (corridorObstacles.length === 0) {
       return {
         riskLevel: this.transitionRisk(RiskLevel.SAFE),
         safeDirection: "forward",
         shouldTrigger: false,
+        context: {
+          centerImmediate: [],
+          centerNear: [],
+          sideNear: [],
+          laneCounters: {
+            leftLaneCount: 0,
+            centerLaneCount: 0,
+            rightLaneCount: 0,
+          },
+          awarenessMessages: [],
+        },
       };
     }
 
-    const blocked: Record<string, number> = { left: 0, forward: 0, right: 0 };
-    let immediateFront = false;
-
-    for (const obj of persistent) {
-      const lastBbox = obj.bboxHistory[obj.bboxHistory.length - 1];
-      if (!lastBbox) continue;
-      const centerX = bboxCenter(lastBbox)[0];
-      const areaRatio = bboxArea(lastBbox);
-
-      const distance =
-        areaRatio >= 0.24 ? "immediate" : areaRatio >= 0.08 ? "near" : "far";
-      const weight = distance === "immediate" ? 2 : 1;
-
-      let direction: string;
-      if (centerX < 0.25) direction = "left";
-      else if (centerX < 0.42) direction = "front-left";
-      else if (centerX <= 0.58) direction = "front";
-      else if (centerX <= 0.75) direction = "front-right";
-      else direction = "right";
-
-      if (direction === "left" || direction === "front-left") {
-        blocked.left += weight;
-      } else if (direction === "right" || direction === "front-right") {
-        blocked.right += weight;
-      } else {
-        blocked.forward += weight;
-        if (distance === "immediate") immediateFront = true;
-      }
-    }
-
-    // Safe direction
-    let safeDirection: string;
-    if (immediateFront && blocked.left > 0 && blocked.right > 0) {
-      safeDirection = "stop";
-    } else {
-      safeDirection = Object.entries(blocked).reduce((a, b) =>
-        a[1] <= b[1] ? a : b
-      )[0];
-    }
-
-    // Risk level
-    const anyImmediate = persistent.some(
-      (o) => o.bboxHistory.length > 0 && bboxArea(o.bboxHistory[o.bboxHistory.length - 1]) >= 0.24
+    const centerImmediate = corridorObstacles.filter(
+      (item) => item.lane === "center" && item.distance === "immediate"
     );
-    const anyNear = persistent.some(
-      (o) => o.bboxHistory.length > 0 && bboxArea(o.bboxHistory[o.bboxHistory.length - 1]) >= 0.08
+    const centerNear = corridorObstacles.filter(
+      (item) => item.lane === "center" && item.distance === "near"
     );
+    const sideNear = corridorObstacles.filter(
+      (item) => item.lane !== "center" && (item.distance === "near" || item.distance === "immediate")
+    );
+
+    const laneCounters = countLaneOccupancy(corridorObstacles);
+    const awarenessMessages = getCrowdAwarenessMessages(laneCounters);
+
+    const context: RiskContext = {
+      centerImmediate,
+      centerNear,
+      sideNear,
+      laneCounters,
+      awarenessMessages,
+    };
+
+    let safeDirection = "forward";
+    if (centerImmediate.length > 0) {
+      safeDirection = chooseSaferSide(context);
+    } else if (centerNear.length > 0) {
+      const leftLoad = sidePressure(context, "left");
+      const rightLoad = sidePressure(context, "right");
+      safeDirection = leftLoad <= rightLoad ? "left" : "right";
+    } else if (sideNear.length > 0) {
+      const leftNear = sideNear.filter((item) => item.lane === "left").length;
+      const rightNear = sideNear.filter((item) => item.lane === "right").length;
+
+      if (leftNear > 0 && rightNear === 0) safeDirection = "right";
+      else if (rightNear > 0 && leftNear === 0) safeDirection = "left";
+    }
 
     let newRisk: RiskLevel;
-    if (immediateFront && blocked.left > 0 && blocked.right > 0) {
-      newRisk = RiskLevel.CRITICAL;
-    } else if (immediateFront || (anyImmediate && blocked.forward > 0)) {
-      newRisk = RiskLevel.DANGER;
-    } else if (
-      persistent.some(
-        (o) => o.isPersistent && classifyMotion(o) === MotionState.APPROACHING
-      )
-    ) {
-      newRisk = RiskLevel.DANGER;
-    } else if (
-      anyNear ||
-      persistent.length >= 2 ||
-      persistent.some((o) => o.smoothedConfidence > 0.7)
-    ) {
-      newRisk = RiskLevel.CAUTION;
-    } else {
-      newRisk = RiskLevel.SAFE;
-    }
+    if (centerImmediate.length > 0) newRisk = RiskLevel.CRITICAL;
+    else if (centerNear.length > 0) newRisk = RiskLevel.DANGER;
+    else if (sideNear.length > 0) newRisk = RiskLevel.CAUTION;
+    else newRisk = RiskLevel.SAFE;
 
     const { risk: finalRisk, trigger: shouldTrigger } =
       this.applyHysteresis(newRisk);
-    return { riskLevel: finalRisk, safeDirection, shouldTrigger };
+    return {
+      riskLevel: finalRisk,
+      safeDirection,
+      shouldTrigger,
+      context,
+    };
   }
 
   private transitionRisk(newRisk: RiskLevel): RiskLevel {
@@ -425,102 +491,95 @@ export class StableRiskDecisionEngine {
 // ==================== ALERT MANAGER ====================
 
 export class AlertManager {
-  private lastAlertMessage = "";
+  private lastAlertMessageKey: MessageKey | "" = "";
 
   generateAlert(
     riskLevel: RiskLevel,
-    trackedObjects: TrackedObject[],
+    context: RiskContext,
     safeDirection: string,
     forceNew = false
-  ): { message: string; event: AlertTriggerEvent | null } {
-    let message: string;
+  ): { messageKey: MessageKey | ""; event: AlertTriggerEvent | null; priority: AlertPriority } {
+    let messageKey: MessageKey;
     let event: AlertTriggerEvent | null;
-
-    const persistent = trackedObjects.filter((o) => o.isPersistent);
+    let priority: AlertPriority;
 
     if (riskLevel === RiskLevel.CRITICAL) {
-      message = this.buildCriticalMessage(persistent, safeDirection);
+      messageKey = this.buildCriticalMessage(context.centerImmediate, safeDirection);
       event = AlertTriggerEvent.OBSTACLE_APPROACHING;
+      priority = "critical";
     } else if (riskLevel === RiskLevel.DANGER) {
-      message = this.buildDangerMessage(persistent, safeDirection);
+      messageKey = this.buildDangerMessage(context.centerNear, safeDirection);
       event = AlertTriggerEvent.OBSTACLE_PERSISTS;
+      priority = "danger";
     } else if (riskLevel === RiskLevel.CAUTION) {
-      message = this.buildCautionMessage(persistent);
+      messageKey = this.buildCautionMessage(context.sideNear);
       event = AlertTriggerEvent.MOTION_DETECTED;
+      priority = "caution";
+    } else if (context.awarenessMessages.length > 0) {
+      messageKey = context.awarenessMessages[0];
+      event = AlertTriggerEvent.MOTION_DETECTED;
+      priority = "awareness";
     } else {
-      message = "Path looks clear. Continue forward.";
+      messageKey = "PATH_CLEAR";
       event = AlertTriggerEvent.OBSTACLE_CLEARED;
+      priority = "awareness";
     }
 
     // Dedup
-    if (message === this.lastAlertMessage && !forceNew) {
-      return { message: "", event: null };
+    if (messageKey === this.lastAlertMessageKey && !forceNew) {
+      return { messageKey: "", event: null, priority };
     }
-    this.lastAlertMessage = message;
-    return { message, event };
+    this.lastAlertMessageKey = messageKey;
+    return { messageKey, event, priority };
   }
 
   private buildCriticalMessage(
-    objects: TrackedObject[],
+    objects: CorridorTrackedObstacle[],
     direction: string
-  ): string {
-    const primary = objects[0]?.className ?? "obstacle";
-    const turnHint: Record<string, string> = {
-      left: "Turn left immediately.",
-      right: "Turn right immediately.",
-      forward: "Back up immediately.",
-      stop: "Stop. You are blocked.",
-    };
-    return `CRITICAL. ${primary} blocking path. ${turnHint[direction] ?? `Move ${direction} immediately.`}`;
+  ): MessageKey {
+    if (direction === "stop") {
+      return "OBSTACLE_BLOCKING";
+    }
+    return "PERSON_AHEAD";
   }
 
   private buildDangerMessage(
-    objects: TrackedObject[],
+    objects: CorridorTrackedObstacle[],
     direction: string
-  ): string {
-    if (objects.length === 0) return "Danger ahead. Proceed carefully.";
-    const types = objects
-      .slice(0, 2)
-      .map((o) => o.className)
-      .join(", ");
-    const turnHint: Record<string, string> = {
-      left: "Turn left carefully.",
-      right: "Turn right carefully.",
-      forward: "Continue forward with caution.",
-      stop: "Stop and reassess.",
-    };
-    return `Danger: ${types} ahead. ${turnHint[direction] ?? `Move ${direction} carefully.`}`;
+  ): MessageKey {
+    if (objects.length === 0) return "DANGER_AHEAD";
+    return direction === "stop" ? "OBSTACLE_BLOCKING" : "DANGER_AHEAD";
   }
 
-  private buildCautionMessage(objects: TrackedObject[]): string {
-    if (objects.length === 0) return "Caution. Possible obstacles detected.";
-    if (objects.length === 1)
-      return `Caution. ${objects[0].className} detected. Proceed slowly.`;
-    return `Caution. Multiple obstacles detected (${objects.length}). Proceed slowly.`;
+  private buildCautionMessage(sideObjects: CorridorTrackedObstacle[]): MessageKey {
+    if (sideObjects.length === 0) {
+      return "CAUTION_OBSTACLE";
+    }
+    return "CAUTION_OBSTACLE";
   }
 }
 
 // ==================== FAIL-SAFE MANAGER ====================
 
 export function getFailsafeResponse(errorType: string): {
-  message: string;
+  messageKey: MessageKey;
   riskLevel: RiskLevel;
 } {
-  const responses: Record<string, { message: string; riskLevel: RiskLevel }> = {
+  const responses: Record<string, { messageKey: MessageKey; riskLevel: RiskLevel }> = {
     image_invalid: {
-      message: "Unable to analyze image. Move slowly.",
+      messageKey: "ANALYSIS_UNAVAILABLE",
       riskLevel: RiskLevel.CAUTION,
     },
     model_unavailable: {
-      message: "Detection system loading. Proceed with caution.",
+      messageKey: "DETECTION_LOADING",
       riskLevel: RiskLevel.CAUTION,
     },
     inference_timeout: {
-      message: "Detection taking too long. Use caution ahead.",
+      messageKey: "DETECTION_SLOW",
       riskLevel: RiskLevel.CAUTION,
     },
     unknown_error: {
-      message: "Detection error. Stop and reassess surroundings.",
+      messageKey: "DETECTION_ERROR_STOP",
       riskLevel: RiskLevel.DANGER,
     },
   };
@@ -562,6 +621,11 @@ export class RobustDetectionPipeline {
   riskEngine = new StableRiskDecisionEngine();
   alertManager = new AlertManager();
   frameIndex = 0;
+  private calibrationState: CalibrationState = "INIT";
+  private stableFrameCount = 0;
+  private readonly calibrationFramesRequired = 4;
+  private frameSignature = "";
+  private calibrationPromptPending = true;
 
   /**
    * Process a single frame of raw detections through the full pipeline.
@@ -574,53 +638,58 @@ export class RobustDetectionPipeline {
     frameHeight: number
   ): DetectionFrame {
     this.frameIndex += 1;
+    this.updateCalibrationState(frameWidth, frameHeight);
 
     // 1. Track objects across frames
     const tracked = this.tracker.update(rawDetections, this.frameIndex);
 
-    // 2. Evaluate risk
-    const { riskLevel, safeDirection, shouldTrigger } =
-      this.riskEngine.evaluate(tracked);
-
-    // 3. Generate alert
-    const { message: alertMessage, event: alertEvent } =
-      this.alertManager.generateAlert(
-        riskLevel,
-        tracked,
-        safeDirection,
-        shouldTrigger
-      );
-
-    const audioMessage =
-      alertMessage || this.getDefaultMessage(riskLevel, safeDirection);
-
-    // 4. Build obstacle + detection coord output
+    // 2. Corridor mapping (must stay lightweight)
+    const tCorridorStart = nowMs();
     const obstacles: ObstacleEntry[] = [];
     const detectionCoords: DetectionCoord[] = [];
+    const corridorTracked: CorridorTrackedObstacle[] = [];
 
     for (const obj of tracked) {
-      if (!obj.isPersistent) continue;
+      const shouldExpose = obj.isPersistent || (obj.decayCounter === 0 && obj.smoothedConfidence >= 0.3);
+      if (!shouldExpose) continue;
+
       const lastBbox = obj.bboxHistory[obj.bboxHistory.length - 1];
       if (!lastBbox) continue;
-      const areaRatio = bboxArea(lastBbox);
-      const distance =
-        areaRatio >= 0.24 ? "immediate" : areaRatio >= 0.08 ? "near" : "far";
-      const cx = bboxCenter(lastBbox)[0];
-      let direction: string;
-      if (cx < 0.25) direction = "left";
-      else if (cx < 0.42) direction = "front-left";
-      else if (cx <= 0.58) direction = "front";
-      else if (cx <= 0.75) direction = "front-right";
-      else direction = "right";
 
-      obstacles.push({
-        type: obj.className,
-        distance,
-        direction,
-        confidence: Math.round(obj.smoothedConfidence * 1000) / 1000,
+      const analyzed = analyzeObstaclePosition(
+        {
+          className: obj.className,
+          confidence: obj.smoothedConfidence,
+          bbox: lastBbox,
+        },
+        frameWidth,
+        frameHeight
+      );
+
+      if (!analyzed) continue;
+
+      const centerX = bboxCenter(lastBbox)[0];
+      const direction = laneFromCenterX(centerX);
+      const mapped: CorridorTrackedObstacle = {
+        ...analyzed,
+        objectId: obj.objectId,
         moving: obj.motionState,
         persistenceFrames: obj.visibilityStreak,
-        objectId: obj.objectId,
+        bbox: lastBbox,
+        direction,
+      };
+
+      corridorTracked.push(mapped);
+
+      obstacles.push({
+        type: mapped.type,
+        distance: mapped.distance,
+        direction,
+        lane: mapped.lane,
+        confidence: Math.round(mapped.confidence * 1000) / 1000,
+        moving: mapped.moving,
+        persistenceFrames: mapped.persistenceFrames,
+        objectId: mapped.objectId,
       });
 
       detectionCoords.push({
@@ -628,11 +697,128 @@ export class RobustDetectionPipeline {
         y1: Math.round(lastBbox.y1 * 10000) / 10000,
         x2: Math.round(lastBbox.x2 * 10000) / 10000,
         y2: Math.round(lastBbox.y2 * 10000) / 10000,
-        label: obj.className,
-        confidence: Math.round(obj.smoothedConfidence * 100) / 100,
-        distance,
-        objectId: obj.objectId,
+        label: mapped.type,
+        confidence: Math.round(mapped.confidence * 100) / 100,
+        distance: mapped.distance,
+        objectId: mapped.objectId,
       });
+    }
+
+    // Fallback to current raw detections when no tracked object has stabilized.
+    if (corridorTracked.length === 0 && rawDetections.length > 0) {
+      const topRaw = [...rawDetections]
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 3);
+
+      for (const det of topRaw) {
+        const analyzed = analyzeObstaclePosition(
+          {
+            className: det.className,
+            confidence: det.confidence,
+            bbox: det.bbox,
+          },
+          frameWidth,
+          frameHeight
+        );
+
+        if (!analyzed) continue;
+
+        const direction = laneFromCenterX(bboxCenter(det.bbox)[0]);
+        const rawId = `raw_${this.frameIndex}_${det.classId}`;
+
+        corridorTracked.push({
+          ...analyzed,
+          objectId: rawId,
+          moving: MotionState.STATIONARY,
+          persistenceFrames: 1,
+          bbox: det.bbox,
+          direction,
+        });
+
+        obstacles.push({
+          type: analyzed.type,
+          distance: analyzed.distance,
+          direction,
+          lane: analyzed.lane,
+          confidence: Math.round(analyzed.confidence * 1000) / 1000,
+          moving: MotionState.STATIONARY,
+          persistenceFrames: 1,
+          objectId: rawId,
+        });
+
+        detectionCoords.push({
+          x1: Math.round(det.bbox.x1 * 10000) / 10000,
+          y1: Math.round(det.bbox.y1 * 10000) / 10000,
+          x2: Math.round(det.bbox.x2 * 10000) / 10000,
+          y2: Math.round(det.bbox.y2 * 10000) / 10000,
+          label: analyzed.type,
+          confidence: Math.round(analyzed.confidence * 100) / 100,
+          distance: analyzed.distance,
+          objectId: rawId,
+        });
+      }
+    }
+
+    const corridorAnalysisMs = Math.round((nowMs() - tCorridorStart) * 1000) / 1000;
+
+    // 3. Evaluate risk
+    const { riskLevel, safeDirection, shouldTrigger, context } =
+      this.riskEngine.evaluate(corridorTracked);
+
+    const laneCounters = context.laneCounters;
+    const corridorDebugOverlay = __DEV__
+      ? buildCorridorDebugOverlay(frameWidth, frameHeight)
+      : undefined;
+
+    // Calibration mutes navigation alerts until camera framing is stable.
+    if (this.calibrationState !== "ACTIVE") {
+      let calibrationMessageKey: MessageKey | "" = "";
+      let alertTriggered = false;
+
+      if (this.calibrationPromptPending) {
+        calibrationMessageKey = "CAMERA_CALIBRATING";
+        this.calibrationPromptPending = false;
+        alertTriggered = true;
+      }
+
+      return {
+        frameIndex: this.frameIndex,
+        timestamp: Date.now(),
+        rawDetections,
+        trackedObjects: tracked,
+        safeDirection: "forward",
+        riskLevel: RiskLevel.SAFE,
+        audioMessageKey: calibrationMessageKey,
+        alertTriggered,
+        alertReason: alertTriggered ? AlertTriggerEvent.NEW_OBSTACLE : null,
+        obstacles,
+        detectionCoords,
+        calibrationState: this.calibrationState,
+        alertPriority: "awareness",
+        laneCounters,
+        corridorAnalysisMs,
+        corridorDebugOverlay,
+      };
+    }
+
+    // 4. Generate alert
+    const { messageKey: alertMessageKey, event: alertEvent, priority: alertPriority } =
+      this.alertManager.generateAlert(
+        riskLevel,
+        context,
+        safeDirection,
+        shouldTrigger
+      );
+
+    let audioMessageKey =
+      alertMessageKey || this.getDefaultMessageKey(riskLevel, safeDirection, context);
+
+    // Awareness messages must never interrupt critical navigation alerts.
+    if (
+      alertPriority === "awareness" &&
+      (riskLevel === RiskLevel.CRITICAL || riskLevel === RiskLevel.DANGER || riskLevel === RiskLevel.CAUTION)
+    ) {
+      audioMessageKey = this.getDefaultMessageKey(riskLevel, safeDirection, context);
     }
 
     return {
@@ -642,24 +828,60 @@ export class RobustDetectionPipeline {
       trackedObjects: tracked,
       safeDirection,
       riskLevel,
-      audioMessage,
+      audioMessageKey,
       alertTriggered: shouldTrigger,
       alertReason: alertEvent,
       obstacles,
       detectionCoords,
+      calibrationState: this.calibrationState,
+      alertPriority,
+      laneCounters,
+      corridorAnalysisMs,
+      corridorDebugOverlay,
     };
   }
 
-  private getDefaultMessage(risk: RiskLevel, direction: string): string {
+  private getDefaultMessageKey(risk: RiskLevel, direction: string, context: RiskContext): MessageKey {
     switch (risk) {
       case RiskLevel.CRITICAL:
-        return "CRITICAL. Stop immediately.";
+        return direction === "stop"
+          ? "OBSTACLE_BLOCKING"
+          : "PERSON_AHEAD";
       case RiskLevel.DANGER:
-        return `Danger ahead. Move ${direction}.`;
+        return "DANGER_AHEAD";
       case RiskLevel.CAUTION:
-        return "Caution. Obstacles nearby.";
+        return "CAUTION_OBSTACLE";
       default:
-        return "Path clear. Continue forward.";
+        if (context.awarenessMessages.length > 0) {
+          return context.awarenessMessages[0];
+        }
+        return "PATH_CLEAR";
+    }
+  }
+
+  private updateCalibrationState(frameWidth: number, frameHeight: number): void {
+    const signature = `${frameWidth}x${frameHeight}`;
+
+    if (this.calibrationState === "INIT") {
+      this.calibrationState = "CALIBRATING";
+      this.stableFrameCount = 0;
+      this.calibrationPromptPending = true;
+      this.frameSignature = signature;
+    }
+
+    if (this.frameSignature !== signature) {
+      this.frameSignature = signature;
+      this.calibrationState = "CALIBRATING";
+      this.stableFrameCount = 0;
+      this.calibrationPromptPending = true;
+      return;
+    }
+
+    if (this.calibrationState === "CALIBRATING") {
+      this.stableFrameCount += 1;
+      if (this.stableFrameCount >= this.calibrationFramesRequired) {
+        this.calibrationState = "ACTIVE";
+      }
     }
   }
 
@@ -667,5 +889,9 @@ export class RobustDetectionPipeline {
     this.tracker.reset();
     this.riskEngine.currentRisk = RiskLevel.SAFE;
     this.frameIndex = 0;
+    this.calibrationState = "INIT";
+    this.stableFrameCount = 0;
+    this.frameSignature = "";
+    this.calibrationPromptPending = true;
   }
 }

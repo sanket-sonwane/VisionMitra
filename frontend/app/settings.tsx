@@ -8,34 +8,68 @@ import { useRouter } from "expo-router";
 import { useStore } from "@/store";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
+import { translate } from "@/localization/translate";
+import { speechLanguageConfig } from "@/localization/speechConfig";
+import type { MessageKey, SupportedLanguage } from "@/localization/messages";
+
+const LANGUAGE_OPTIONS: Array<{ code: SupportedLanguage; label: string; nativeLabel: string }> = [
+  { code: "en", label: "English", nativeLabel: "English" },
+  { code: "hi", label: "Hindi", nativeLabel: "हिन्दी" },
+  { code: "gu", label: "Gujarati", nativeLabel: "ગુજરાતી" },
+];
+
+const LANGUAGE_SWITCH_CONFIRMATION: Record<SupportedLanguage, string> = {
+  en: "Language changed to English.",
+  hi: "भाषा हिंदी में बदल दी गई है।",
+  gu: "ભાષા ગુજરાતી માં બદલી દેવામાં આવી છે.",
+};
 
 export default function Settings() {
   const router = useRouter();
-  const { isOnlineMode, toggleMode, userId } = useStore();
+  const { isOnlineMode, toggleMode, userId, language, setLanguage } = useStore();
   const [speechRate, setSpeechRate] = useState(0.9);
   const [hapticEnabled, setHapticEnabled] = useState(true);
+  const selectedLanguageCode = speechLanguageConfig[language];
+
+  const speakKey = (messageKey: MessageKey, rate: number = 0.9) => {
+    Speech.speak(translate(messageKey), {
+      language: selectedLanguageCode,
+      pitch: 1.0,
+      rate,
+    });
+  };
 
   useEffect(() => {
-    Speech.speak("Settings. Configure your preferences.");
+    speakKey("SETTINGS_INTRO");
   }, []);
 
   const handleModeToggle = () => {
     toggleMode();
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const newMode = !isOnlineMode ? "online" : "offline";
-    Speech.speak(`Switched to ${newMode} mode.`);
+    const modeKey: MessageKey = !isOnlineMode ? "MODE_SWITCHED_ONLINE" : "MODE_SWITCHED_OFFLINE";
+    speakKey(modeKey);
   };
 
   const testVoice = () => {
-    Speech.speak("This is a voice test. Adjust speech rate in settings.", {
-      language: "en",
-      pitch: 1.0,
-      rate: speechRate,
-    });
+    speakKey("VOICE_TEST_SAMPLE", speechRate);
   };
 
   const speakDescription = (text: string) => {
-    Speech.speak(text, { language: "en", pitch: 1.0, rate: 0.9 });
+    Speech.speak(text, { language: selectedLanguageCode, pitch: 1.0, rate: 0.9 });
+  };
+
+  const handleLanguageSelect = (nextLanguage: SupportedLanguage) => {
+    if (nextLanguage === language) return;
+
+    setLanguage(nextLanguage);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    Speech.stop();
+    Speech.speak(LANGUAGE_SWITCH_CONFIRMATION[nextLanguage], {
+      language: speechLanguageConfig[nextLanguage],
+      pitch: 1.0,
+      rate: 0.95,
+    });
   };
 
   return (
@@ -95,6 +129,36 @@ export default function Settings() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Accessibility</Text>
 
+          <View style={styles.settingCard}>
+            <View style={styles.settingIcon}>
+              <Ionicons name="language" size={24} color="#9C27B0" />
+            </View>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingName}>Language</Text>
+              <Text style={styles.settingDescription}>Choose speech language</Text>
+            </View>
+          </View>
+
+          <View style={styles.languageOptionsWrap}>
+            {LANGUAGE_OPTIONS.map((option) => {
+              const isSelected = language === option.code;
+              return (
+                <TouchableOpacity
+                  key={option.code}
+                  style={[styles.languageOption, isSelected && styles.languageOptionSelected]}
+                  onPress={() => handleLanguageSelect(option.code)}
+                >
+                  <Text style={[styles.languageOptionTitle, isSelected && styles.languageOptionTitleSelected]}>
+                    {option.label}
+                  </Text>
+                  <Text style={[styles.languageOptionSubtitle, isSelected && styles.languageOptionTitleSelected]}>
+                    {option.nativeLabel}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
           <TouchableOpacity
             style={styles.settingCard}
             onPress={() => {
@@ -102,9 +166,7 @@ export default function Settings() {
               if (!hapticEnabled) {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               }
-              Speech.speak(
-                hapticEnabled ? "Haptic feedback disabled" : "Haptic feedback enabled"
-              );
+              speakKey(hapticEnabled ? "HAPTIC_DISABLED" : "HAPTIC_ENABLED");
             }}
             onLongPress={() =>
               speakDescription(
@@ -198,11 +260,7 @@ export default function Settings() {
         <View style={styles.section}>
           <TouchableOpacity
             style={styles.helpButton}
-            onPress={() =>
-              Speech.speak(
-                "Eye Guide is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation."
-              )
-            }
+            onPress={() => speakKey("HOW_TO_USE_GUIDE", 0.88)}
           >
             <Ionicons name="help-circle" size={24} color="#2196F3" />
             <Text style={styles.helpText}>How to use Eye Guide</Text>
@@ -274,6 +332,37 @@ const styles = StyleSheet.create({
   settingDescription: {
     fontSize: 14,
     color: "#B0B0B0",
+  },
+  languageOptionsWrap: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12,
+  },
+  languageOption: {
+    flex: 1,
+    backgroundColor: "#1E1E1E",
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: "#2A2A2A",
+  },
+  languageOptionSelected: {
+    borderColor: "#2196F3",
+    backgroundColor: "#102236",
+  },
+  languageOptionTitle: {
+    fontSize: 14,
+    color: "#fff",
+    fontWeight: "600",
+  },
+  languageOptionSubtitle: {
+    fontSize: 12,
+    color: "#B0B0B0",
+    marginTop: 2,
+  },
+  languageOptionTitleSelected: {
+    color: "#90CAF9",
   },
   infoCard: {
     backgroundColor: "#1E1E1E",

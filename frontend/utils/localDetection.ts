@@ -34,6 +34,7 @@ export interface LocalDetectionResult extends DetectionFrame {
     preprocessMs: number;
     inferenceMs: number;
     sceneAnalysisMs: number;
+    corridorMs: number;
     pipelineMs: number;
     totalMs: number;
   };
@@ -106,6 +107,31 @@ async function loadOnnxModel(): Promise<boolean> {
 
 const MODEL_INPUT_SIZE = 320;
 
+interface PreprocessMeta {
+  scale: number;
+  padX: number;
+  padY: number;
+}
+
+// Class-specific floor to reduce noisy low-confidence labels while keeping
+// critical mobility classes responsive.
+const CLASS_MIN_CONF: Record<string, number> = {
+  person: 0.2,
+  bicycle: 0.22,
+  motorcycle: 0.22,
+  car: 0.22,
+  bus: 0.22,
+  truck: 0.22,
+  train: 0.22,
+  dog: 0.24,
+  cat: 0.26,
+  chair: 0.32,
+  bench: 0.32,
+  laptop: 0.45,
+  book: 0.5,
+  handbag: 0.48,
+};
+
 /**
  * Decode base64 JPEG and create YOLO input tensor.
  * Returns Float32Array in NCHW format [1, 3, 320, 320], normalized [0,1].
@@ -117,32 +143,65 @@ function preprocessImageForYolo(
   pixels: Uint8Array,
   srcWidth: number,
   srcHeight: number
-): Float32Array {
+): { tensor: Float32Array; meta: PreprocessMeta } {
   const S = MODEL_INPUT_SIZE;
   const tensor = new Float32Array(1 * 3 * S * S);
 
-  // Bilinear-ish resample (nearest-neighbor for speed)
-  const scaleX = srcWidth / S;
-  const scaleY = srcHeight / S;
+  // Letterbox: preserve aspect ratio and pad with neutral gray.
+  const scale = Math.min(S / srcWidth, S / srcHeight);
+  const resizedW = Math.max(1, Math.round(srcWidth * scale));
+  const resizedH = Math.max(1, Math.round(srcHeight * scale));
+  const padX = Math.floor((S - resizedW) / 2);
+  const padY = Math.floor((S - resizedH) / 2);
+  const padValue = 114 / 255.0;
 
-  for (let y = 0; y < S; y++) {
-    const srcY = Math.min(Math.floor(y * scaleY), srcHeight - 1);
-    for (let x = 0; x < S; x++) {
-      const srcX = Math.min(Math.floor(x * scaleX), srcWidth - 1);
-      const srcIdx = (srcY * srcWidth + srcX) * 4; // RGBA
+  // Fill with padding color first.
+  for (let i = 0; i < S * S; i++) {
+    tensor[0 * S * S + i] = padValue;
+    tensor[1 * S * S + i] = padValue;
+    tensor[2 * S * S + i] = padValue;
+  }
 
-      const r = pixels[srcIdx] / 255.0;
-      const g = pixels[srcIdx + 1] / 255.0;
-      const b = pixels[srcIdx + 2] / 255.0;
+  // Bilinear resize into letterbox region.
+  for (let y = 0; y < resizedH; y++) {
+    const dstY = y + padY;
+    const srcYFloat = (y + 0.5) / scale - 0.5;
+    const y0 = Math.max(0, Math.min(srcHeight - 1, Math.floor(srcYFloat)));
+    const y1 = Math.max(0, Math.min(srcHeight - 1, y0 + 1));
+    const wy = Math.max(0, Math.min(1, srcYFloat - y0));
+
+    for (let x = 0; x < resizedW; x++) {
+      const dstX = x + padX;
+      const srcXFloat = (x + 0.5) / scale - 0.5;
+      const x0 = Math.max(0, Math.min(srcWidth - 1, Math.floor(srcXFloat)));
+      const x1 = Math.max(0, Math.min(srcWidth - 1, x0 + 1));
+      const wx = Math.max(0, Math.min(1, srcXFloat - x0));
+
+      const p00 = (y0 * srcWidth + x0) * 4;
+      const p01 = (y0 * srcWidth + x1) * 4;
+      const p10 = (y1 * srcWidth + x0) * 4;
+      const p11 = (y1 * srcWidth + x1) * 4;
+
+      const w00 = (1 - wx) * (1 - wy);
+      const w01 = wx * (1 - wy);
+      const w10 = (1 - wx) * wy;
+      const w11 = wx * wy;
+
+      const r = (pixels[p00] * w00 + pixels[p01] * w01 + pixels[p10] * w10 + pixels[p11] * w11) / 255.0;
+      const g = (pixels[p00 + 1] * w00 + pixels[p01 + 1] * w01 + pixels[p10 + 1] * w10 + pixels[p11 + 1] * w11) / 255.0;
+      const b = (pixels[p00 + 2] * w00 + pixels[p01 + 2] * w01 + pixels[p10 + 2] * w10 + pixels[p11 + 2] * w11) / 255.0;
 
       // NCHW layout: [batch, channel, height, width]
-      tensor[0 * S * S + y * S + x] = r; // R channel
-      tensor[1 * S * S + y * S + x] = g; // G channel
-      tensor[2 * S * S + y * S + x] = b; // B channel
+      tensor[0 * S * S + dstY * S + dstX] = r;
+      tensor[1 * S * S + dstY * S + dstX] = g;
+      tensor[2 * S * S + dstY * S + dstX] = b;
     }
   }
 
-  return tensor;
+  return {
+    tensor,
+    meta: { scale, padX, padY },
+  };
 }
 
 // ==================== YOLO OUTPUT PARSING ====================
@@ -157,7 +216,8 @@ function parseYoloOutput(
   numDetections: number,
   confThreshold: number,
   frameWidth: number,
-  frameHeight: number
+  frameHeight: number,
+  prepMeta: PreprocessMeta
 ): RawDetection[] {
   const detections: RawDetection[] = [];
   const numClasses = 80;
@@ -181,16 +241,30 @@ function parseYoloOutput(
       }
     }
 
-    if (maxConf < confThreshold) continue;
-
     const className = COCO_CLASSES[maxClassId] || `class_${maxClassId}`;
     if (!MOBILITY_RELEVANT_CLASSES.has(className)) continue;
 
-    // Convert from pixel coords (320x320) to normalized [0,1]
-    const x1 = Math.max(0, (xCenter - w / 2) / MODEL_INPUT_SIZE);
-    const y1 = Math.max(0, (yCenter - h / 2) / MODEL_INPUT_SIZE);
-    const x2 = Math.min(1, (xCenter + w / 2) / MODEL_INPUT_SIZE);
-    const y2 = Math.min(1, (yCenter + h / 2) / MODEL_INPUT_SIZE);
+    const classMinConf = CLASS_MIN_CONF[className] ?? confThreshold;
+    const effectiveMinConf = Math.max(confThreshold, classMinConf);
+    if (maxConf < effectiveMinConf) continue;
+
+    // Undo letterbox transform back to original frame space.
+    const modelX1 = xCenter - w / 2;
+    const modelY1 = yCenter - h / 2;
+    const modelX2 = xCenter + w / 2;
+    const modelY2 = yCenter + h / 2;
+
+    const srcX1 = (modelX1 - prepMeta.padX) / prepMeta.scale;
+    const srcY1 = (modelY1 - prepMeta.padY) / prepMeta.scale;
+    const srcX2 = (modelX2 - prepMeta.padX) / prepMeta.scale;
+    const srcY2 = (modelY2 - prepMeta.padY) / prepMeta.scale;
+
+    const x1 = Math.max(0, Math.min(1, srcX1 / frameWidth));
+    const y1 = Math.max(0, Math.min(1, srcY1 / frameHeight));
+    const x2 = Math.max(0, Math.min(1, srcX2 / frameWidth));
+    const y2 = Math.max(0, Math.min(1, srcY2 / frameHeight));
+
+    if (x2 <= x1 || y2 <= y1) continue;
 
     detections.push({
       classId: maxClassId,
@@ -259,7 +333,7 @@ export function clearPipeline(sessionId: string): void {
 
 // ==================== MAIN DETECTION FUNCTION ====================
 
-const CONF_THRESHOLD = 0.25;
+const CONF_THRESHOLD = 0.18;
 
 // Max resolution for scene analysis — larger images get downsampled
 const MAX_SCENE_WIDTH = 320;
@@ -330,7 +404,7 @@ export async function detectObstaclesLocal(
     if (loaded && onnxSession) {
       // Preprocess: pixels → [1, 3, 320, 320] tensor
       const tp0 = Date.now();
-      const inputTensor = preprocessImageForYolo(pixels, width, height);
+      const preprocessed = preprocessImageForYolo(pixels, width, height);
       tPreprocess = Date.now() - tp0;
 
       // Run inference
@@ -339,7 +413,7 @@ export async function detectObstaclesLocal(
       try { ort = require("onnxruntime-react-native"); } catch (_e) { /* skip */ }
       if (!ort || !ort.Tensor) throw new Error("ONNX native module unavailable");
       const feeds = {
-        images: new ort.Tensor("float32", inputTensor, [
+        images: new ort.Tensor("float32", preprocessed.tensor, [
           1,
           3,
           MODEL_INPUT_SIZE,
@@ -361,7 +435,8 @@ export async function detectObstaclesLocal(
         numDetections,
         CONF_THRESHOLD,
         width,
-        height
+        height,
+        preprocessed.meta
       );
     }
   } catch (e: any) {
@@ -408,6 +483,12 @@ export async function detectObstaclesLocal(
   const result = pipeline.processFrame(rawDetections, width, height);
   const tPipe = Date.now() - tPipe0;
 
+  if (__DEV__ && result.corridorAnalysisMs > 5) {
+    console.warn(
+      `[LOCAL-DETECT] Corridor analysis exceeded target: ${result.corridorAnalysisMs.toFixed(2)}ms`
+    );
+  }
+
   const totalMs = Date.now() - t0;
 
   return {
@@ -416,6 +497,7 @@ export async function detectObstaclesLocal(
       preprocessMs: tPreprocess,
       inferenceMs: tInference,
       sceneAnalysisMs: tScene,
+      corridorMs: result.corridorAnalysisMs,
       pipelineMs: tPipe,
       totalMs,
     },

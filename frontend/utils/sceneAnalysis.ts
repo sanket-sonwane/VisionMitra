@@ -8,6 +8,8 @@
  * Uses raw pixel data from camera frames — works offline, no WiFi.
  */
 
+import { computeGroundROI } from "@/navigation/corridorMapping";
+
 export interface ProximityResult {
   isObstructed: boolean;
   obstructionConfidence: number;
@@ -295,6 +297,12 @@ export function proximitySyntheticDetection(
 ): { className: string; confidence: number; bbox: { x1: number; y1: number; x2: number; y2: number } } | null {
   if (!result.isObstructed) return null;
 
+  const roi = computeGroundROI(frameWidth, frameHeight);
+  const x1 = Math.max(0, Math.min(1, roi.topLeft.x / frameWidth));
+  const x2 = Math.max(0, Math.min(1, roi.topRight.x / frameWidth));
+  const y1 = Math.max(0, Math.min(1, roi.topLeft.y / frameHeight));
+  const y2 = 1;
+
   const labelMap: Record<string, string> = {
     wall_or_flat_surface: "wall",
     very_close_object: "close obstacle",
@@ -304,6 +312,6 @@ export function proximitySyntheticDetection(
   return {
     className: labelMap[result.reason] ?? "obstacle",
     confidence: Math.min(0.9, result.obstructionConfidence + 0.25),
-    bbox: { x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.9 },
+    bbox: { x1, y1, x2, y2 },
   };
 }

@@ -1,4 +1,7 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from 'zustand';
+import { createJSONStorage, persist } from "zustand/middleware";
+import type { SupportedLanguage } from "@/localization/messages";
 
 interface EmergencyContact {
   id: string;
@@ -26,6 +29,8 @@ interface Store {
   setUserId: (id: string) => void;
   isOnlineMode: boolean;
   toggleMode: () => void;
+  language: SupportedLanguage;
+  setLanguage: (language: SupportedLanguage) => void;
   currentSession: NavigationSession | null;
   setCurrentSession: (session: NavigationSession | null) => void;
   emergencyContacts: EmergencyContact[];
@@ -34,19 +39,30 @@ interface Store {
   removeEmergencyContact: (id: string) => void;
 }
 
-export const useStore = create<Store>((set) => ({
-  userId: "demo_user",
-  setUserId: (id) => set({ userId: id }),
-  isOnlineMode: true,
-  toggleMode: () => set((state) => ({ isOnlineMode: !state.isOnlineMode })),
-  currentSession: null,
-  setCurrentSession: (session) => set({ currentSession: session }),
-  emergencyContacts: [],
-  setEmergencyContacts: (contacts) => set({ emergencyContacts: contacts }),
-  addEmergencyContact: (contact) =>
-    set((state) => ({ emergencyContacts: [...state.emergencyContacts, contact] })),
-  removeEmergencyContact: (id) =>
-    set((state) => ({
-      emergencyContacts: state.emergencyContacts.filter((c) => c.id !== id),
-    })),
-}));
+export const useStore = create<Store>()(
+  persist(
+    (set) => ({
+      userId: "demo_user",
+      setUserId: (id) => set({ userId: id }),
+      isOnlineMode: true,
+      toggleMode: () => set((state) => ({ isOnlineMode: !state.isOnlineMode })),
+      language: "en",
+      setLanguage: (language) => set({ language }),
+      currentSession: null,
+      setCurrentSession: (session) => set({ currentSession: session }),
+      emergencyContacts: [],
+      setEmergencyContacts: (contacts) => set({ emergencyContacts: contacts }),
+      addEmergencyContact: (contact) =>
+        set((state) => ({ emergencyContacts: [...state.emergencyContacts, contact] })),
+      removeEmergencyContact: (id) =>
+        set((state) => ({
+          emergencyContacts: state.emergencyContacts.filter((c) => c.id !== id),
+        })),
+    }),
+    {
+      name: "visionmitra-settings",
+      storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({ language: state.language }),
+    }
+  )
+);
