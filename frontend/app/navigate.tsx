@@ -1,10 +1,11 @@
 import { StyleSheet, View, TouchableOpacity, Text, TextInput, ScrollView, Alert } from "react-native";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { requireOptionalNativeModule } from "expo-modules-core";
 import axios from "axios";
 import { useStore } from "@/store";
@@ -27,6 +28,7 @@ import {
   formatDistance,
   formatTime,
   generateAudioInstruction,
+  consumePendingRouteDestination,
   clearStopCache,
   type JourneyPlan,
   type NavigationSegment,
@@ -73,9 +75,20 @@ export default function Navigate() {
 
   useEffect(() => {
     speakLocalizedMessage("NAVIGATION_INTRO");
-    getCurrentLocation();
     // Clear cache on mount
     clearStopCache();
+
+    const pendingDestination = consumePendingRouteDestination();
+    if (pendingDestination) {
+      setDestinationQuery(pendingDestination);
+      void (async () => {
+        const resolvedLocation = await getCurrentLocation();
+        if (!resolvedLocation) return;
+        await geocodeDestination(pendingDestination, resolvedLocation);
+      })();
+    } else {
+      getCurrentLocation();
+    }
 
     const speechRecognitionModule = loadSpeechRecognitionModule();
     speechRecognitionModuleRef.current = speechRecognitionModule;
@@ -134,12 +147,12 @@ export default function Navigate() {
     );
   }, [voiceModuleMissing]);
 
-  const getCurrentLocation = async () => {
+  const getCurrentLocation = async (): Promise<Coordinates | null> => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") {
         speakLocalizedMessage("LOCATION_PERMISSION_REQUIRED");
-        return;
+        return null;
       }
 
       const location = await Location.getCurrentPositionAsync({});
@@ -150,23 +163,35 @@ export default function Navigate() {
       setCurrentLocation(coords);
 
       speakLocalizedMessage("LOCATION_ACQUIRED");
+      return coords;
     } catch (error) {
       console.error("Location error:", error);
       speakLocalizedMessage("LOCATION_UNAVAILABLE");
+      return null;
     }
   };
 
   // Geocode destination query using Nominatim (OpenStreetMap)
-  const geocodeDestination = async () => {
-    if (!destinationQuery.trim()) {
+  const geocodeDestination = async (
+    queryOverride?: string,
+    locationOverride?: Coordinates | null
+  ) => {
+    const destinationInput = (queryOverride ?? destinationQuery).trim();
+
+    if (!destinationInput) {
       speakLocalizedMessage("ENTER_DESTINATION");
       return;
     }
 
-    if (!currentLocation) {
+    setDestinationQuery(destinationInput);
+
+    let effectiveLocation = locationOverride ?? currentLocation;
+    if (!effectiveLocation) {
       speakLocalizedMessage("GETTING_LOCATION_FIRST");
-      await getCurrentLocation();
-      return;
+      effectiveLocation = await getCurrentLocation();
+      if (!effectiveLocation) {
+        return;
+      }
     }
 
     setLoading(true);
@@ -178,7 +203,7 @@ export default function Navigate() {
       // Use Nominatim for geocoding
       const response = await axios.get("https://nominatim.openstreetmap.org/search", {
         params: {
-          q: destinationQuery,
+          q: destinationInput,
           format: "json",
           limit: 1,
           addressdetails: 1,
@@ -205,8 +230,8 @@ export default function Navigate() {
       setDestinationCoords(destCoords);
       
       const distance = calculateDistance(
-        currentLocation.latitude,
-        currentLocation.longitude,
+        effectiveLocation.latitude,
+        effectiveLocation.longitude,
         destCoords.latitude,
         destCoords.longitude
       );
@@ -214,7 +239,7 @@ export default function Navigate() {
       speakLocalizedText(destinationFoundText(result.display_name, formatDistance(distance)));
 
       // Plan the journey
-      await planAndExecuteJourney(destCoords, result.display_name);
+      await planAndExecuteJourney(destCoords, result.display_name, effectiveLocation);
       
     } catch (error) {
       console.error("Geocoding error:", error);
@@ -279,9 +304,12 @@ export default function Navigate() {
   // Plan journey using journey planner
   const planAndExecuteJourney = async (
     destination: Coordinates,
-    destinationName: string
+    destinationName: string,
+    startCoordinates?: Coordinates
   ) => {
-    if (!currentLocation) {
+    const originCoordinates = startCoordinates ?? currentLocation;
+
+    if (!originCoordinates) {
       speakLocalizedMessage("CURRENT_LOCATION_NOT_AVAILABLE");
       setPlanningJourney(false);
       setLoading(false);
@@ -292,7 +320,7 @@ export default function Navigate() {
       setPlanningJourney(true);
       speakLocalizedMessage("COMPUTING_ROUTE");
 
-      const plan = await planJourney(currentLocation, destination);
+      const plan = await planJourney(originCoordinates, destination);
       setJourneyPlan(plan);
       setShowJourneyDetails(true);
 
@@ -383,6 +411,32 @@ export default function Navigate() {
     }
   };
 
+  const processPendingDestinationCommand = async () => {
+    if (planningJourney || loading) {
+      return;
+    }
+
+    const pendingDestination = consumePendingRouteDestination();
+    if (!pendingDestination) {
+      return;
+    }
+
+    setDestinationQuery(pendingDestination);
+    const resolvedLocation = currentLocation ?? (await getCurrentLocation());
+    if (!resolvedLocation) {
+      return;
+    }
+
+    await geocodeDestination(pendingDestination, resolvedLocation);
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      void processPendingDestinationCommand();
+      return () => {};
+    }, [currentLocation, planningJourney, loading])
+  );
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -459,7 +513,9 @@ export default function Navigate() {
           </View>
           <TouchableOpacity
             style={[styles.planButton, (planningJourney || !currentLocation || !destinationQuery.trim()) && styles.planButtonDisabled]}
-            onPress={geocodeDestination}
+            onPress={() => {
+              void geocodeDestination();
+            }}
             disabled={planningJourney || !currentLocation || !destinationQuery.trim()}
           >
             <Ionicons name="navigate" size={24} color="#fff" />

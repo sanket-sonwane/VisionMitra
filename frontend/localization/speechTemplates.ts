@@ -70,8 +70,7 @@ export const callingContactText = (name: string): string =>
 
 export const sosStatusSummaryText = (
   locationAvailable: boolean,
-  notifyModeUsed: "direct" | "composer" | "failed",
-  backendLogged: boolean
+  notifyModeUsed: "direct" | "composer" | "failed"
 ): string => {
   const locationText = locationAvailable
     ? localized({
@@ -104,17 +103,11 @@ export const sosStatusSummaryText = (
           gu: "આપાત્કાલીન સંપર્કો માટે SMS કમ્પોઝર ખોલ્યું.",
         });
 
-  const backendText = backendLogged
-    ? localized({
-        en: "Emergency logged in system.",
-        hi: "आपातकाल सिस्टम में दर्ज कर दिया गया है।",
-        gu: "આપાત્કાલ સિસ્ટમમાં નોંધાયો છે.",
-      })
-    : localized({
-        en: "Backend unavailable, local SOS still completed.",
-        hi: "बैकएंड उपलब्ध नहीं है, लेकिन स्थानीय SOS पूरा हुआ।",
-        gu: "બેકએન્ડ ઉપલબ્ધ નથી, છતાં સ્થાનિક SOS પૂર્ણ થયું.",
-      });
+  const localProcessingText = localized({
+    en: "SOS handled locally on this device.",
+    hi: "SOS इस डिवाइस पर स्थानीय रूप से संभाला गया।",
+    gu: "SOS આ ઉપકરણ પર સ્થાનિક રીતે સંભાળવામાં આવ્યું.",
+  });
 
-  return `${locationText} ${notifyText} ${backendText}`;
+  return `${locationText} ${notifyText} ${localProcessingText}`;
 };

@@ -1,6 +1,5 @@
 import { Linking, NativeModules, Platform } from "react-native";
 import * as Location from "expo-location";
-import axios from "axios";
 
 export interface EmergencyContact {
   id: string;
@@ -29,8 +28,6 @@ interface NotifyResult {
 
 export interface TriggerEmergencyParams {
   contacts: EmergencyContact[];
-  userId: string;
-  backendUrl?: string;
   modePreference?: SmsMode;
   locationTimeoutMs?: number;
   batteryPercent?: number;
@@ -40,8 +37,6 @@ export interface TriggerEmergencyResult {
   message: string;
   location: LocationResult;
   notify: NotifyResult;
-  backendLogged: boolean;
-  backendError?: string;
   topPriorityContact: EmergencyContact | null;
 }
 
@@ -133,10 +128,20 @@ export function buildEmergencyMessage(
   return lines.join("\n");
 }
 
-function buildSmsUrl(recipients: string[], message: string): string {
-  const recipientList = recipients.join(",");
+function buildSmsUrls(recipients: string[], message: string): string[] {
   const separator = Platform.OS === "ios" ? "&" : "?";
-  return `sms:${recipientList}${separator}body=${encodeURIComponent(message)}`;
+  const encodedBody = encodeURIComponent(message);
+  const commaRecipients = recipients.join(",");
+  const semicolonRecipients = recipients.join(";");
+
+  const candidates = [
+    commaRecipients ? `sms:${commaRecipients}${separator}body=${encodedBody}` : "",
+    semicolonRecipients ? `sms:${semicolonRecipients}${separator}body=${encodedBody}` : "",
+    recipients[0] ? `sms:${recipients[0]}${separator}body=${encodedBody}` : "",
+    `sms:${separator}body=${encodedBody}`,
+  ].filter(Boolean);
+
+  return Array.from(new Set(candidates));
 }
 
 async function openComposerSms(phones: string[], message: string): Promise<NotifyResult> {
@@ -151,23 +156,32 @@ async function openComposerSms(phones: string[], message: string): Promise<Notif
   }
 
   try {
-    const url = buildSmsUrl(cleaned, message);
-    const canOpen = await Linking.canOpenURL(url);
-    if (!canOpen) {
-      return {
-        modeUsed: "failed",
-        contactsAttempted: cleaned,
-        contactsNotified: [],
-        notifyErrors: ["SMS composer is unavailable on this device"],
-      };
+    const candidateUrls = buildSmsUrls(cleaned, message);
+    let lastError: unknown;
+
+    for (const url of candidateUrls) {
+      try {
+        await Linking.openURL(url);
+        return {
+          modeUsed: "composer",
+          contactsAttempted: cleaned,
+          contactsNotified: cleaned,
+          notifyErrors: [],
+        };
+      } catch (error) {
+        lastError = error;
+      }
     }
 
-    await Linking.openURL(url);
     return {
-      modeUsed: "composer",
+      modeUsed: "failed",
       contactsAttempted: cleaned,
-      contactsNotified: cleaned,
-      notifyErrors: [],
+      contactsNotified: [],
+      notifyErrors: [
+        lastError instanceof Error
+          ? `SMS composer is unavailable on this device: ${lastError.message}`
+          : "SMS composer is unavailable on this device",
+      ],
     };
   } catch (error: any) {
     return {
@@ -269,34 +283,10 @@ export async function triggerEmergencyFlow(
     };
   }
 
-  let backendLogged = false;
-  let backendError: string | undefined;
-
-  if (params.backendUrl) {
-    try {
-      await axios.post(`${params.backendUrl}/api/emergency-alert`, {
-        user_id: params.userId,
-        latitude: location.latitude,
-        longitude: location.longitude,
-        message,
-        sms_mode_used: notify.modeUsed,
-        contacts_attempted: notify.contactsAttempted,
-        contacts_notified: notify.contactsNotified,
-        notify_errors: notify.notifyErrors,
-      }, { timeout: 5000 });
-      backendLogged = true;
-    } catch (error: any) {
-      backendLogged = false;
-      backendError = error?.message || "Failed to log emergency alert";
-    }
-  }
-
   return {
     message,
     location,
     notify,
-    backendLogged,
-    backendError,
     topPriorityContact: sortedContacts[0] || null,
   };
 }

@@ -74,6 +74,9 @@ export type MessageKey =
   | "CANCEL_LABEL"
   | "ADD_NEW_CONTACT_LABEL"
   | "SETTINGS_MODE_TOGGLE_DESC"
+  | "VOICE_COMMANDS_ENABLED"
+  | "VOICE_COMMANDS_DISABLED"
+  | "SETTINGS_VOICE_COMMANDS_DESC"
   | "SETTINGS_HAPTIC_DESC"
   | "SETTINGS_VOICE_TEST_DESC"
   | "SETTINGS_HELP_DESCRIPTION";
@@ -445,6 +448,21 @@ export const messages: MessageDictionary = {
     en: "Toggle between online and offline mode. Online mode uses AI for accurate detection. Offline mode uses basic detection and works without internet.",
     hi: "ऑनलाइन और ऑफलाइन मोड के बीच बदलें। ऑनलाइन मोड सटीक पहचान के लिए AI का उपयोग करता है। ऑफलाइन मोड बुनियादी पहचान का उपयोग करता है और इंटरनेट के बिना काम करता है।",
     gu: "ઓનલાઇન અને ઓફલાઇન મોડ વચ્ચે બદલો. ઓનલાઈન મોડ ચોક્કસ શોધ માટે AI નો ઉપયોગ કરે છે. ઓફલાઇન મોડ મૂળભૂત શોધનો ઉપયોગ કરે છે અને ઇન્ટરનેટ વગર કામ કરે છે.",
+  },
+  VOICE_COMMANDS_ENABLED: {
+    en: "Voice commands enabled.",
+    hi: "वॉइस कमांड सक्षम कर दिए गए हैं।",
+    gu: "વૉઇસ કમાન્ડ સક્રિય કરવામાં આવ્યા છે.",
+  },
+  VOICE_COMMANDS_DISABLED: {
+    en: "Voice commands disabled.",
+    hi: "वॉइस कमांड बंद कर दिए गए हैं।",
+    gu: "વૉઇસ કમાન્ડ બંધ કરવામાં આવ્યા છે.",
+  },
+  SETTINGS_VOICE_COMMANDS_DESC: {
+    en: "Enable wake phrase listening for hands-free control.",
+    hi: "हैंड्स-फ्री नियंत्रण के लिए वेक फ्रेज सुनना सक्षम करें।",
+    gu: "હેન્ડ્સ-ફ્રી નિયંત્રણ માટે વેક-ફ્રેઝ સાંભળવું સક્રિય કરો.",
   },
   SETTINGS_HAPTIC_DESC: {
     en: "Toggle haptic feedback. Provides vibration alerts for actions and warnings.",

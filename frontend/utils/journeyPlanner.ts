@@ -83,6 +83,27 @@ const OVERPASS_MAX_RETRIES_PER_ENDPOINT = 2;
 // Cache for session-duration stop data
 let stopCache: Map<string, TransportStop[]> = new Map();
 let lastOverpassRequestAt = 0;
+let pendingRouteDestination: string | null = null;
+
+/**
+ * Accepts a destination from external controllers (e.g., voice command flow)
+ * and stores it until the navigation screen consumes it.
+ */
+export function startRoute(destination: string): void {
+  const cleanedDestination = destination.trim();
+  if (!cleanedDestination) return;
+
+  pendingRouteDestination = cleanedDestination;
+}
+
+/**
+ * Returns and clears any pending voice-start destination.
+ */
+export function consumePendingRouteDestination(): string | null {
+  const destination = pendingRouteDestination;
+  pendingRouteDestination = null;
+  return destination;
+}
 
 // ==================== UTILITY FUNCTIONS ====================
 

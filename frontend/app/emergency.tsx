@@ -4,7 +4,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
-import axios from "axios";
 import { useStore } from "@/store";
 import { triggerEmergencyFlow, type EmergencyContact, type SmsMode } from "@/utils/sosService";
 import {
@@ -18,53 +17,8 @@ import {
   sosStatusSummaryText,
 } from "@/localization/speechTemplates";
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-const API_TIMEOUT = 10000;
-
-function normalizeBaseUrl(url?: string): string {
-  return (url || "").trim().replace(/\/$/, "");
-}
-
-function getBackendCandidates(): string[] {
-  const configured = normalizeBaseUrl(BACKEND_URL);
-  const fallbacks = [
-    "http://10.0.2.2:8001",
-    "http://127.0.0.1:8001",
-    "http://localhost:8001",
-  ];
-
-  const candidates = [configured, ...fallbacks].filter(Boolean);
-  return Array.from(new Set(candidates));
-}
-
-function isNetworkError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return false;
-  return !error.response;
-}
-
-async function requestWithFallback<T>(
-  executor: (baseUrl: string) => Promise<T>
-): Promise<T> {
-  const candidates = getBackendCandidates();
-  let lastError: unknown;
-
-  for (const baseUrl of candidates) {
-    try {
-      return await executor(baseUrl);
-    } catch (error) {
-      lastError = error;
-      if (!isNetworkError(error)) {
-        throw error;
-      }
-    }
-  }
-
-  throw lastError || new Error("Backend unavailable");
-}
-
 export default function Emergency() {
   const router = useRouter();
-  const [contacts, setContacts] = useState<EmergencyContact[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newContact, setNewContact] = useState({
     name: "",
@@ -73,45 +27,15 @@ export default function Emergency() {
   });
   const [sosActive, setSosActive] = useState(false);
   const {
-    userId,
     emergencyContacts: storedContacts,
-    setEmergencyContacts,
     addEmergencyContact,
     removeEmergencyContact,
   } = useStore();
+  const contacts = storedContacts;
 
   useEffect(() => {
     speakLocalizedMessage("EMERGENCY_INTRO");
-    loadContacts();
   }, []);
-
-  // Sync local contacts state with store whenever contacts change
-  useEffect(() => {
-    if (contacts.length > 0) {
-      setEmergencyContacts(contacts);
-    }
-  }, [contacts]);
-
-  const loadContacts = async () => {
-    try {
-      const response = await requestWithFallback((baseUrl) =>
-        axios.get(
-          `${baseUrl}/api/emergency-contacts/${userId || "demo_user"}`,
-          { timeout: API_TIMEOUT }
-        )
-      );
-      setContacts(response.data);
-    } catch (error) {
-      console.error("Load contacts error:", error);
-      // Fall back to locally stored contacts
-      if (storedContacts.length > 0) {
-        setContacts(storedContacts);
-        console.log("Using locally stored contacts as fallback");
-      } else if (isNetworkError(error)) {
-        speakLocalizedMessage("BACKEND_UNAVAILABLE_LOCAL_CONTACTS");
-      }
-    }
-  };
 
   const addContact = async () => {
     if (!newContact.name || !newContact.phone) {
@@ -119,39 +43,20 @@ export default function Emergency() {
       return;
     }
 
+    const nextPriority =
+      contacts.length === 0
+        ? 1
+        : Math.max(...contacts.map((contact) => contact.priority || 0)) + 1;
+
     const contactData: EmergencyContact = {
       id: `local_${Date.now()}`,
       name: newContact.name,
       phone: newContact.phone,
       relationship: newContact.relationship || "Contact",
-      priority: contacts.length + 1,
+      priority: nextPriority,
     };
 
-    // Try backend first
-    try {
-      const response = await requestWithFallback((baseUrl) =>
-        axios.post(
-          `${baseUrl}/api/emergency-contacts`,
-          {
-            user_id: userId || "demo_user",
-            name: newContact.name,
-            phone: newContact.phone,
-            relationship: newContact.relationship || "Contact",
-            priority: contacts.length + 1,
-          },
-          { timeout: API_TIMEOUT }
-        )
-      );
-      // Use backend-returned contact (has server-generated id)
-      const serverContact = response.data;
-      setContacts((prev) => [...prev, serverContact]);
-      addEmergencyContact(serverContact);
-    } catch (error) {
-      console.warn("Backend add failed, saving locally:", error);
-      // Save locally even if backend fails
-      setContacts((prev) => [...prev, contactData]);
-      addEmergencyContact(contactData);
-    }
+    addEmergencyContact(contactData);
 
     speakLocalizedMessage("CONTACT_ADDED_SUCCESS");
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -160,20 +65,7 @@ export default function Emergency() {
   };
 
   const deleteContact = async (contactId: string, name: string) => {
-    // Always remove locally
-    setContacts((prev) => prev.filter((c) => c.id !== contactId));
     removeEmergencyContact(contactId);
-
-    // Try backend (non-fatal)
-    try {
-      await requestWithFallback((baseUrl) =>
-        axios.delete(`${baseUrl}/api/emergency-contacts/${contactId}`, {
-          timeout: API_TIMEOUT,
-        })
-      );
-    } catch (error) {
-      console.warn("Backend delete failed, removed locally:", error);
-    }
 
     speakLocalizedText(contactRemovedText(name));
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -199,16 +91,13 @@ export default function Emergency() {
 
       const result = await triggerEmergencyFlow({
         contacts,
-        userId: userId || "demo_user",
-        backendUrl: BACKEND_URL,
         modePreference: smsMode,
       });
 
       speakLocalizedText(
         sosStatusSummaryText(
           result.location.locationAvailable,
-          result.notify.modeUsed,
-          result.backendLogged
+          result.notify.modeUsed
         )
       );
 

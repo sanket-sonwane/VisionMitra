@@ -12,7 +12,15 @@ import Constants from "expo-constants";
 
 export default function Settings() {
   const router = useRouter();
-  const { isOnlineMode, toggleMode, userId, language, setLanguage } = useStore();
+  const {
+    isOnlineMode,
+    toggleMode,
+    userId,
+    language,
+    setLanguage,
+    voiceCommandsEnabled,
+    setVoiceCommandsEnabled,
+  } = useStore();
   const [speechRate, setSpeechRate] = useState(0.9);
   const [hapticEnabled, setHapticEnabled] = useState(true);
 
@@ -48,6 +56,13 @@ export default function Settings() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     stopLocalizedSpeech();
     speakLocalizedMessage(confirmationKey, { rate: speechRate });
+  };
+
+  const handleVoiceCommandToggle = (nextValue?: boolean) => {
+    const enabled = typeof nextValue === "boolean" ? nextValue : !voiceCommandsEnabled;
+    setVoiceCommandsEnabled(enabled);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    speakMessageKey(enabled ? "VOICE_COMMANDS_ENABLED" : "VOICE_COMMANDS_DISABLED");
   };
 
   const testVoice = () => {
@@ -134,6 +149,34 @@ export default function Settings() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Accessibility</Text>
+
+          <TouchableOpacity
+            style={styles.settingCard}
+            onPress={() => handleVoiceCommandToggle()}
+            onLongPress={() => speakDescription("SETTINGS_VOICE_COMMANDS_DESC")}
+          >
+            <View style={styles.settingIcon}>
+              <Ionicons
+                name={voiceCommandsEnabled ? "mic" : "mic-off"}
+                size={24}
+                color={voiceCommandsEnabled ? "#26C6DA" : "#767577"}
+              />
+            </View>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingName}>Voice Commands</Text>
+              <Text style={styles.settingDescription}>
+                {voiceCommandsEnabled
+                  ? "Wake phrase listening enabled"
+                  : "Wake phrase listening disabled"}
+              </Text>
+            </View>
+            <Switch
+              value={voiceCommandsEnabled}
+              onValueChange={handleVoiceCommandToggle}
+              trackColor={{ false: "#767577", true: "#26C6DA" }}
+              thumbColor={voiceCommandsEnabled ? "#fff" : "#f4f3f4"}
+            />
+          </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.settingCard}
