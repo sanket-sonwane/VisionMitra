@@ -5,37 +5,76 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import { useRouter } from "expo-router";
-import { useStore } from "@/store";
+import { useStore, type AppLanguage } from "@/store";
+import type { MessageKey } from "@/localization/messages";
+import { getSpeechLanguageCode } from "@/localization/speechConfig";
+import { translate } from "@/localization/translate";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
 
 export default function Settings() {
   const router = useRouter();
-  const { isOnlineMode, toggleMode, userId } = useStore();
+  const { isOnlineMode, toggleMode, userId, language, setLanguage } = useStore();
   const [speechRate, setSpeechRate] = useState(0.9);
   const [hapticEnabled, setHapticEnabled] = useState(true);
+  const speechLanguageCode = getSpeechLanguageCode(language);
+
+  const languageOptions: Array<{
+    value: AppLanguage;
+    label: string;
+    nativeLabel: string;
+    confirmationKey: MessageKey;
+  }> = [
+    { value: "en", label: "English", nativeLabel: "English", confirmationKey: "LANGUAGE_SET_ENGLISH" },
+    { value: "hi", label: "Hindi", nativeLabel: "हिंदी", confirmationKey: "LANGUAGE_SET_HINDI" },
+    { value: "gu", label: "Gujarati", nativeLabel: "ગુજરાતી", confirmationKey: "LANGUAGE_SET_GUJARATI" },
+  ];
+
+  const speakMessageKey = (messageKey: MessageKey, rate: number = 0.9) => {
+    Speech.speak(translate(messageKey), {
+      language: speechLanguageCode,
+      pitch: 1.0,
+      rate,
+    });
+  };
+
+  const speakText = (text: string, rate: number = 0.9) => {
+    Speech.speak(text, {
+      language: speechLanguageCode,
+      pitch: 1.0,
+      rate,
+    });
+  };
 
   useEffect(() => {
-    Speech.speak("Settings. Configure your preferences.");
+    speakMessageKey("SETTINGS_INTRO");
   }, []);
 
   const handleModeToggle = () => {
+    const nextOnlineMode = !isOnlineMode;
     toggleMode();
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const newMode = !isOnlineMode ? "online" : "offline";
-    Speech.speak(`Switched to ${newMode} mode.`);
+    speakMessageKey(nextOnlineMode ? "MODE_SWITCHED_ONLINE" : "MODE_SWITCHED_OFFLINE");
   };
 
-  const testVoice = () => {
-    Speech.speak("This is a voice test. Adjust speech rate in settings.", {
-      language: "en",
+  const handleLanguageSelect = (nextLanguage: AppLanguage, confirmationKey: MessageKey) => {
+    if (nextLanguage === language) return;
+    setLanguage(nextLanguage);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    Speech.stop();
+    Speech.speak(translate(confirmationKey), {
+      language: getSpeechLanguageCode(nextLanguage),
       pitch: 1.0,
       rate: speechRate,
     });
   };
 
+  const testVoice = () => {
+    speakMessageKey("VOICE_TEST_SAMPLE", speechRate);
+  };
+
   const speakDescription = (text: string) => {
-    Speech.speak(text, { language: "en", pitch: 1.0, rate: 0.9 });
+    speakText(text, 0.9);
   };
 
   return (
@@ -93,6 +132,30 @@ export default function Settings() {
         </View>
 
         <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Language</Text>
+          {languageOptions.map((option) => (
+            <TouchableOpacity
+              key={option.value}
+              style={styles.settingCard}
+              onPress={() => handleLanguageSelect(option.value, option.confirmationKey)}
+            >
+              <View style={styles.settingIcon}>
+                <Ionicons name="language" size={24} color="#26C6DA" />
+              </View>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingName}>{option.label}</Text>
+                <Text style={styles.settingDescription}>{option.nativeLabel}</Text>
+              </View>
+              {language === option.value ? (
+                <Ionicons name="checkmark-circle" size={24} color="#26C6DA" />
+              ) : (
+                <Ionicons name="ellipse-outline" size={24} color="#767577" />
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.section}>
           <Text style={styles.sectionTitle}>Accessibility</Text>
 
           <TouchableOpacity
@@ -102,8 +165,8 @@ export default function Settings() {
               if (!hapticEnabled) {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               }
-              Speech.speak(
-                hapticEnabled ? "Haptic feedback disabled" : "Haptic feedback enabled"
+              speakMessageKey(
+                hapticEnabled ? "HAPTIC_FEEDBACK_DISABLED" : "HAPTIC_FEEDBACK_ENABLED"
               );
             }}
             onLongPress={() =>
@@ -199,7 +262,7 @@ export default function Settings() {
           <TouchableOpacity
             style={styles.helpButton}
             onPress={() =>
-              Speech.speak(
+              speakText(
                 "Eye Guide is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation."
               )
             }

@@ -24,6 +24,7 @@ import {
   type CorridorObstacle,
   type DistanceBucket,
 } from "@/navigation/corridorMapping";
+import type { MessageKey } from "@/localization/messages";
 
 // ==================== ENUMS ====================
 
@@ -207,7 +208,7 @@ export interface DetectionFrame {
   trackedObjects: TrackedObject[];
   safeDirection: string;
   riskLevel: RiskLevel;
-  audioMessage: string;
+  audioMessage: MessageKey | "";
   alertTriggered: boolean;
   alertReason: AlertTriggerEvent | null;
   obstacles: ObstacleEntry[];
@@ -332,7 +333,7 @@ interface RiskContext {
   centerNear: CorridorTrackedObstacle[];
   sideNear: CorridorTrackedObstacle[];
   laneCounters: CorridorLaneCounters;
-  awarenessMessages: string[];
+  awarenessMessages: MessageKey[];
 }
 
 const nowMs = (): number => {
@@ -490,15 +491,15 @@ export class StableRiskDecisionEngine {
 // ==================== ALERT MANAGER ====================
 
 export class AlertManager {
-  private lastAlertMessage = "";
+  private lastAlertMessage: MessageKey | "" = "";
 
   generateAlert(
     riskLevel: RiskLevel,
     context: RiskContext,
     safeDirection: string,
     forceNew = false
-  ): { message: string; event: AlertTriggerEvent | null; priority: AlertPriority } {
-    let message: string;
+  ): { message: MessageKey | ""; event: AlertTriggerEvent | null; priority: AlertPriority } {
+    let message: MessageKey | "";
     let event: AlertTriggerEvent | null;
     let priority: AlertPriority;
 
@@ -515,11 +516,11 @@ export class AlertManager {
       event = AlertTriggerEvent.MOTION_DETECTED;
       priority = "caution";
     } else if (context.awarenessMessages.length > 0) {
-      message = context.awarenessMessages.join(". ");
+      message = context.awarenessMessages[0];
       event = AlertTriggerEvent.MOTION_DETECTED;
       priority = "awareness";
     } else {
-      message = "Path looks clear. Continue forward.";
+      message = "PATH_CLEAR";
       event = AlertTriggerEvent.OBSTACLE_CLEARED;
       priority = "awareness";
     }
@@ -535,68 +536,63 @@ export class AlertManager {
   private buildCriticalMessage(
     objects: CorridorTrackedObstacle[],
     direction: string
-  ): string {
-    const primary = objects[0]?.type ?? "obstacle";
-    const turnHint: Record<string, string> = {
-      left: "Turn left immediately.",
-      right: "Turn right immediately.",
-      forward: "Back up immediately.",
-      stop: "Stop. You are blocked.",
-    };
+  ): MessageKey {
+    const primary = objects[0]?.type?.toLowerCase() ?? "";
     if (direction === "stop") {
-      return "Obstacle blocking path. Stop.";
+      return "OBSTACLE_BLOCKING";
     }
-    return `${primary} ahead. Move ${direction === "left" ? "slightly left" : "slightly right"}.`;
+    if (primary.includes("person")) {
+      return "PERSON_AHEAD";
+    }
+    return direction === "left" ? "OBSTACLE_AHEAD_LEFT" : "OBSTACLE_AHEAD_RIGHT";
   }
 
   private buildDangerMessage(
     objects: CorridorTrackedObstacle[],
     direction: string
-  ): string {
-    if (objects.length === 0) return "Danger ahead. Proceed carefully.";
-    const types = objects
-      .slice(0, 2)
-      .map((o) => o.type)
-      .join(", ");
+  ): MessageKey {
+    if (objects.length === 0) return "PERSON_AHEAD";
     if (direction === "left" || direction === "right") {
-      return `${types} ahead. Move slightly ${direction}.`;
+      return direction === "left" ? "OBSTACLE_AHEAD_LEFT" : "OBSTACLE_AHEAD_RIGHT";
     }
-    return `Danger: ${types} ahead. Slow down and reassess.`;
+    return "PERSON_AHEAD";
   }
 
-  private buildCautionMessage(sideObjects: CorridorTrackedObstacle[]): string {
+  private buildCautionMessage(sideObjects: CorridorTrackedObstacle[]): MessageKey {
     if (sideObjects.length === 0) {
-      return "Caution. Possible obstacles detected.";
+      return "CAUTION_SIDE_OBSTACLE";
     }
 
-    const top = sideObjects.slice(0, 2).map((entry) => {
-      return `${entry.type} on ${entry.lane}`;
-    });
-    return `Caution. ${top.join(" and ")}. Keep centered.`;
+    const hasLeft = sideObjects.some((entry) => entry.lane === "left");
+    const hasRight = sideObjects.some((entry) => entry.lane === "right");
+
+    if (hasLeft && !hasRight) return "CROWD_LEFT";
+    if (hasRight && !hasLeft) return "CROWD_RIGHT";
+    return "CAUTION_SIDE_OBSTACLE";
   }
 }
 
 // ==================== FAIL-SAFE MANAGER ====================
 
 export function getFailsafeResponse(errorType: string): {
-  message: string;
+  message: MessageKey;
   riskLevel: RiskLevel;
 } {
-  const responses: Record<string, { message: string; riskLevel: RiskLevel }> = {
+  const responses: Record<string, { message: MessageKey; riskLevel: RiskLevel }> = {
     image_invalid: {
-      message: "Unable to analyze image. Move slowly.",
+      message: "ANALYSIS_UNAVAILABLE",
       riskLevel: RiskLevel.CAUTION,
     },
     model_unavailable: {
-      message: "Detection system loading. Proceed with caution.",
+      message: "CAMERA_CALIBRATING",
       riskLevel: RiskLevel.CAUTION,
     },
     inference_timeout: {
-      message: "Detection taking too long. Use caution ahead.",
+      message: "ANALYSIS_UNAVAILABLE",
       riskLevel: RiskLevel.CAUTION,
     },
     unknown_error: {
-      message: "Detection error. Stop and reassess surroundings.",
+      message: "ANALYSIS_FAILED",
       riskLevel: RiskLevel.DANGER,
     },
   };
@@ -789,11 +785,11 @@ export class RobustDetectionPipeline {
 
     // Calibration mutes navigation alerts until camera framing is stable.
     if (this.calibrationState !== "ACTIVE") {
-      let calibrationMessage = "";
+      let calibrationMessage: MessageKey | "" = "";
       let alertTriggered = false;
 
       if (this.calibrationPromptPending) {
-        calibrationMessage = "Camera is calibrating. Please hold steady.";
+        calibrationMessage = "CAMERA_CALIBRATING";
         this.calibrationPromptPending = false;
         alertTriggered = true;
       }
@@ -858,21 +854,23 @@ export class RobustDetectionPipeline {
     };
   }
 
-  private getDefaultMessage(risk: RiskLevel, direction: string, context: RiskContext): string {
+  private getDefaultMessage(risk: RiskLevel, direction: string, context: RiskContext): MessageKey {
     switch (risk) {
       case RiskLevel.CRITICAL:
         return direction === "stop"
-          ? "Obstacle blocking path. Stop."
-          : `Obstacle ahead. Move ${direction}.`;
+          ? "OBSTACLE_BLOCKING"
+          : direction === "left"
+            ? "OBSTACLE_AHEAD_LEFT"
+            : "OBSTACLE_AHEAD_RIGHT";
       case RiskLevel.DANGER:
-        return `Person ahead. Move slightly ${direction}.`;
+        return "PERSON_AHEAD";
       case RiskLevel.CAUTION:
-        return "Caution. Side obstacle nearby. Keep centered.";
+        return "CAUTION_SIDE_OBSTACLE";
       default:
         if (context.awarenessMessages.length > 0) {
-          return context.awarenessMessages.join(". ");
+          return context.awarenessMessages[0];
         }
-        return "Path clear. Continue forward.";
+        return "PATH_CLEAR";
     }
   }
 

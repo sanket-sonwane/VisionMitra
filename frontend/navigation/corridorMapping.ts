@@ -1,3 +1,5 @@
+import type { MessageKey } from "@/localization/messages";
+
 export interface Point2D {
   x: number;
   y: number;
@@ -165,11 +167,11 @@ export function countLaneOccupancy(obstacles: CorridorObstacle[]): CorridorLaneC
 export function getCrowdAwarenessMessages(
   counters: CorridorLaneCounters,
   threshold: number = 3
-): string[] {
-  const messages: string[] = [];
-  if (counters.leftLaneCount >= threshold) messages.push("Crowd on the left");
-  if (counters.rightLaneCount >= threshold) messages.push("Crowd on the right");
-  return messages;
+): MessageKey[] {
+  const messageKeys: MessageKey[] = [];
+  if (counters.leftLaneCount >= threshold) messageKeys.push("CROWD_LEFT");
+  if (counters.rightLaneCount >= threshold) messageKeys.push("CROWD_RIGHT");
+  return messageKeys;
 }
 
 export function buildCorridorDebugOverlay(

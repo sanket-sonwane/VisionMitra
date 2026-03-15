@@ -10,6 +10,9 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { useRouter } from "expo-router";
 import axios from "axios";
 import { useStore } from "@/store";
+import type { MessageKey } from "@/localization/messages";
+import { getSpeechLanguageCode } from "@/localization/speechConfig";
+import { isMessageKey, translate } from "@/localization/translate";
 import {
   calculateDistance,
   calculateBearing,
@@ -53,7 +56,53 @@ export default function Camera() {
   const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [modelStatus, setModelStatus] = useState<string>("loading");
   const [pictureSize, setPictureSize] = useState<string | undefined>("640x480");
-  const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
+  const { userId, isOnlineMode, currentSession, setCurrentSession, language } = useStore();
+  const speechLanguageCode = getSpeechLanguageCode(language);
+
+  const speakMessageKey = (messageKey: MessageKey, rate: number = 1.0) => {
+    Speech.speak(translate(messageKey), {
+      language: speechLanguageCode,
+      pitch: 1.0,
+      rate,
+    });
+  };
+
+  const speakText = (text: string, rate: number = 1.0) => {
+    Speech.speak(text, {
+      language: speechLanguageCode,
+      pitch: 1.0,
+      rate,
+    });
+  };
+
+  const resolveAlertMessageKey = (
+    rawMessage: unknown,
+    warningLevel?: string,
+    safeDirection?: string
+  ): MessageKey => {
+    if (typeof rawMessage === "string" && rawMessage.length > 0) {
+      if (isMessageKey(rawMessage)) return rawMessage;
+
+      const normalized = rawMessage.toLowerCase();
+      if (normalized.includes("calibrat")) return "CAMERA_CALIBRATING";
+      if (normalized.includes("crowd") && normalized.includes("left")) return "CROWD_LEFT";
+      if (normalized.includes("crowd") && normalized.includes("right")) return "CROWD_RIGHT";
+      if (normalized.includes("blocking")) return "OBSTACLE_BLOCKING";
+      if (normalized.includes("person")) return "PERSON_AHEAD";
+      if (normalized.includes("path clear") || normalized.includes("continue forward")) return "PATH_CLEAR";
+      if (normalized.includes("caution") || normalized.includes("side obstacle")) return "CAUTION_SIDE_OBSTACLE";
+    }
+
+    if (warningLevel === "critical") {
+      if (safeDirection === "left") return "OBSTACLE_AHEAD_LEFT";
+      if (safeDirection === "right") return "OBSTACLE_AHEAD_RIGHT";
+      return "OBSTACLE_BLOCKING";
+    }
+
+    if (warningLevel === "danger") return "PERSON_AHEAD";
+    if (warningLevel === "caution") return "CAUTION_SIDE_OBSTACLE";
+    return "PATH_CLEAR";
+  };
 
   useEffect(() => {
     requestLocationPermission();
@@ -88,12 +137,12 @@ export default function Camera() {
 
   const initializeNavigation = () => {
     if (currentSession?.journey_plan) {
-      Speech.speak("Segmented navigation active. Starting first segment.");
+      speakMessageKey("SEGMENTED_NAVIGATION_ACTIVE");
       updateCurrentSegment();
       startLocationTracking();
       startHeadingTracking();
     } else {
-      Speech.speak("Camera mode. Tap analyze button to detect obstacles.");
+      speakMessageKey("CAMERA_MODE_ACTIVE");
     }
   };
 
@@ -140,10 +189,10 @@ export default function Camera() {
     if (segmentIndex < segments.length) {
       const segment = segments[segmentIndex];
       setCurrentSegment(segment);
-      Speech.speak(generateAudioInstruction(segment));
+      speakText(generateAudioInstruction(segment));
     } else {
       // Journey completed
-      Speech.speak("You have arrived at your destination!");
+      speakMessageKey("DESTINATION_REACHED");
       completeNavigation();
     }
   };
@@ -202,7 +251,7 @@ export default function Camera() {
     const now = Date.now();
     if (currentSegment.type === "WALK" && dirText && now - lastDirectionAnnounce.current > 20000) {
       lastDirectionAnnounce.current = now;
-      Speech.speak(dirText);
+      speakText(dirText);
     }
   };
 
@@ -255,7 +304,7 @@ export default function Camera() {
       };
       setCurrentSession(updatedSession);
 
-      Speech.speak(`Segment complete. Starting next segment.`);
+      speakMessageKey("SEGMENT_COMPLETE");
       setSegmentProgress(0);
     } else {
       // All segments complete
@@ -279,7 +328,7 @@ export default function Camera() {
     });
 
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    Speech.speak("Navigation complete. You have arrived at your destination.");
+    speakMessageKey("NAVIGATION_COMPLETE");
     
     // Clear session
     setCurrentSession(null);
@@ -329,7 +378,7 @@ export default function Camera() {
       // Skip haptics in continuous mode for speed
       if (!isContinuousRef.current) {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        Speech.speak("Analyzing surroundings...");
+        speakMessageKey("ANALYZING_SURROUNDINGS");
       }
 
       // Capture a smaller frame with enough detail for YOLO.
@@ -390,7 +439,10 @@ export default function Camera() {
             obstacles: localResult.obstacles,
             safe_direction: localResult.safeDirection,
             warning_level: localResult.riskLevel,
-            audio_message: localResult.audioMessage,
+            audio_message_key: localResult.audioMessage || undefined,
+            audio_message: localResult.audioMessage
+              ? translate(localResult.audioMessage)
+              : "",
             detection_coords: localResult.detectionCoords,
             debug_info: showDebugInfo ? {
               mode: "on-device",
@@ -443,7 +495,10 @@ export default function Camera() {
               obstacles: localResult.obstacles,
               safe_direction: localResult.safeDirection,
               warning_level: localResult.riskLevel,
-              audio_message: localResult.audioMessage,
+              audio_message_key: localResult.audioMessage || undefined,
+              audio_message: localResult.audioMessage
+                ? translate(localResult.audioMessage)
+                : "",
               detection_coords: localResult.detectionCoords,
               debug_info: showDebugInfo ? {
                 mode: "scene-only",
@@ -470,6 +525,26 @@ export default function Camera() {
       }
 
       if (result) {
+        const rawAlertValue =
+          typeof result.audio_message_key === "string" && result.audio_message_key.length > 0
+            ? result.audio_message_key
+            : typeof result.audio_message === "string" && result.audio_message.length > 0
+              ? result.audio_message
+              : null;
+
+        if (rawAlertValue) {
+          const resolvedKey = resolveAlertMessageKey(
+            rawAlertValue,
+            result.warning_level,
+            result.safe_direction
+          );
+          result.audio_message_key = resolvedKey;
+          result.audio_message = translate(resolvedKey);
+        } else {
+          result.audio_message_key = undefined;
+          result.audio_message = "";
+        }
+
         setLastAnalysis(result);
 
         if (showDebugInfo) {
@@ -493,20 +568,14 @@ export default function Camera() {
         }
 
         // Speak the audio message (only critical/danger in continuous mode)
-        if (result.audio_message) {
-          const isCalibrationPrompt =
-            typeof result.audio_message === "string" &&
-            result.audio_message.toLowerCase().includes("calibrating");
+        if (result.audio_message_key) {
+          const isCalibrationPrompt = result.audio_message_key === "CAMERA_CALIBRATING";
           const shouldSpeak = !isContinuousRef.current || 
             result.warning_level === "critical" || 
             result.warning_level === "danger" ||
             isCalibrationPrompt;
           if (shouldSpeak) {
-            Speech.speak(result.audio_message, {
-              language: "en",
-              pitch: 1.0,
-              rate: 1.1, // Slightly faster
-            });
+            speakMessageKey(result.audio_message_key, 1.1);
           }
         }
         
@@ -514,17 +583,18 @@ export default function Camera() {
         console.log(`[CAMERA] Total captureAndAnalyze: ${Date.now() - totalStart}ms`);
       } else {
         if (!isContinuousRef.current) {
-          Speech.speak("Unable to analyze image. Proceed with caution.");
+          speakMessageKey("ANALYSIS_UNAVAILABLE");
         }
         setLastAnalysis({
           warning_level: "caution",
-          audio_message: "Unable to analyze image. Proceed with caution.",
+          audio_message_key: "ANALYSIS_UNAVAILABLE",
+          audio_message: translate("ANALYSIS_UNAVAILABLE"),
         });
       }
 
     } catch (error: any) {
       console.error("Analysis error:", error);
-      Speech.speak("Analysis failed. Please try again.");
+      speakMessageKey("ANALYSIS_FAILED");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       setIsAnalyzing(false);
@@ -597,7 +667,7 @@ export default function Camera() {
   const startContinuousAnalysis = () => {
     setIsActive(true);
     isContinuousRef.current = true;
-    Speech.speak("Continuous monitoring started");
+    speakMessageKey("CONTINUOUS_MONITORING_STARTED");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
     // Frame counter for timing
@@ -629,7 +699,7 @@ export default function Camera() {
   const stopContinuousAnalysis = () => {
     setIsActive(false);
     isContinuousRef.current = false;
-    Speech.speak("Continuous monitoring stopped");
+    speakMessageKey("CONTINUOUS_MONITORING_STOPPED");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     
     if (analysisInterval.current) {
@@ -799,7 +869,7 @@ export default function Camera() {
               style={[styles.analyzeButton, isAnalyzing && styles.analyzeButtonDisabled]}
               onPress={captureAndAnalyze}
               disabled={isAnalyzing}
-              onLongPress={() => Speech.speak("Analyze once. Takes a photo and analyzes obstacles.")}
+              onLongPress={() => speakMessageKey("ANALYZE_ONCE_HINT")}
             >
               <Ionicons name="scan" size={32} color="#fff" />
               <Text style={styles.buttonText}>
@@ -810,7 +880,7 @@ export default function Camera() {
             <TouchableOpacity
               style={styles.continuousButton}
               onPress={startContinuousAnalysis}
-              onLongPress={() => Speech.speak("Start continuous monitoring. Analyzes every 3 seconds.")}
+              onLongPress={() => speakMessageKey("START_MONITORING_HINT")}
             >
               <Ionicons name="play" size={32} color="#fff" />
               <Text style={styles.buttonText}>Start Monitoring</Text>
@@ -820,7 +890,7 @@ export default function Camera() {
           <TouchableOpacity
             style={styles.stopButton}
             onPress={stopContinuousAnalysis}
-            onLongPress={() => Speech.speak("Stop continuous monitoring")}
+            onLongPress={() => speakMessageKey("STOP_MONITORING_HINT")}
           >
             <Ionicons name="stop" size={32} color="#fff" />
             <Text style={styles.buttonText}>Stop Monitoring</Text>
@@ -831,7 +901,11 @@ export default function Camera() {
       {lastAnalysis && (
         <View style={styles.resultContainer}>
           <Text style={styles.resultTitle}>Last Analysis:</Text>
-          <Text style={styles.resultMessage}>{lastAnalysis.audio_message}</Text>
+          <Text style={styles.resultMessage}>
+            {lastAnalysis.audio_message_key && isMessageKey(lastAnalysis.audio_message_key)
+              ? translate(lastAnalysis.audio_message_key)
+              : lastAnalysis.audio_message}
+          </Text>
           {lastAnalysis.obstacles && lastAnalysis.obstacles.length > 0 && (
             <View style={styles.obstacleList}>
               {lastAnalysis.obstacles.map((obs: any, idx: number) => (

@@ -1,4 +1,12 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from 'zustand';
+
+const LANGUAGE_STORAGE_KEY = "@visionmitra/language";
+
+export type AppLanguage = "en" | "hi" | "gu";
+
+const isValidLanguage = (value: string | null): value is AppLanguage =>
+  value === "en" || value === "hi" || value === "gu";
 
 interface EmergencyContact {
   id: string;
@@ -26,6 +34,8 @@ interface Store {
   setUserId: (id: string) => void;
   isOnlineMode: boolean;
   toggleMode: () => void;
+  language: AppLanguage;
+  setLanguage: (language: AppLanguage) => void;
   currentSession: NavigationSession | null;
   setCurrentSession: (session: NavigationSession | null) => void;
   emergencyContacts: EmergencyContact[];
@@ -39,6 +49,13 @@ export const useStore = create<Store>((set) => ({
   setUserId: (id) => set({ userId: id }),
   isOnlineMode: true,
   toggleMode: () => set((state) => ({ isOnlineMode: !state.isOnlineMode })),
+  language: "en",
+  setLanguage: (language) => {
+    set({ language });
+    AsyncStorage.setItem(LANGUAGE_STORAGE_KEY, language).catch((error) => {
+      console.warn("[STORE] Failed to persist language:", error);
+    });
+  },
   currentSession: null,
   setCurrentSession: (session) => set({ currentSession: session }),
   emergencyContacts: [],
@@ -50,3 +67,16 @@ export const useStore = create<Store>((set) => ({
       emergencyContacts: state.emergencyContacts.filter((c) => c.id !== id),
     })),
 }));
+
+const hydrateLanguage = async () => {
+  try {
+    const savedLanguage = await AsyncStorage.getItem(LANGUAGE_STORAGE_KEY);
+    if (isValidLanguage(savedLanguage)) {
+      useStore.setState({ language: savedLanguage });
+    }
+  } catch (error) {
+    console.warn("[STORE] Failed to load saved language:", error);
+  }
+};
+
+void hydrateLanguage();
