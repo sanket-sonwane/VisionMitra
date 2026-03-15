@@ -11,10 +11,16 @@ export interface ParsedIntent {
 }
 
 const WAKE_PHRASE_PATTERNS: RegExp[] = [
+  // Exact / normal matches
   /\bhey\s+vision\s*mitra\b/i,
   /\bhey\s+visionmitra\b/i,
   /\bhi\s+vision\s*mitra\b/i,
   /\bvision\s*mitra\b/i,
+  // Fuzzy: common ASR mishearings in noisy environments
+  /\bvision\s+meet(?:ra|er|re|a|hra)?\b/i,   // "vision meetra", "vision meter"
+  /\bv(?:ish|ish|iz)(?:on|un|en)\s+mitra\b/i, // "vishon mitra", "vizon mitra"
+  /\bvision\s+mi(?:t|d)(?:ra|a|er)\b/i,       // "vision mida", "vision mider"
+  /\bvision\s+m[iy]tr/i,                        // "vision mitr..." partial
 ];
 
 const WAKE_PREFIX_PATTERNS: RegExp[] = [

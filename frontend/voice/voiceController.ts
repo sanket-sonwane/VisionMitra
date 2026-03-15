@@ -33,9 +33,9 @@ export interface VoiceControllerOptions {
 
 const ACTIVE_LISTENING_TIMEOUT_MS = 10_000;
 const RECOGNITION_RESET_DELAY_MS = 120;
-const PASSIVE_RESTART_DELAY_MS = 1_500;
+const PASSIVE_CONTINUOUS_RESTART_DELAY_MS = 400; // fast restart if continuous session dies
+const PASSIVE_REFRESH_MS = 25_000;               // refresh session before Android kills it
 const ACTIVE_RESTART_DELAY_MS = 500;
-const PASSIVE_NO_SPEECH_DELAY_MS = 2_200;
 const ACTIVE_NO_SPEECH_DELAY_MS = 900;
 const WAKE_RESPONSE_GAP_MS = 1200;
 const TTS_RETRY_DELAY_MS = 800;
@@ -85,6 +85,36 @@ function extractTranscript(event: any): string {
   return "";
 }
 
+/** Returns all recognition alternatives (for noise-tolerant wake-word matching). */
+function extractAllTranscripts(event: any): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const push = (t: string): void => {
+    const s = t.trim();
+    if (s && !seen.has(s)) { seen.add(s); out.push(s); }
+  };
+
+  const rawResults = event?.results;
+  if (Array.isArray(rawResults)) {
+    for (const result of rawResults) {
+      if (typeof result === "string") {
+        push(result);
+      } else if (result && typeof result.transcript === "string") {
+        push(result.transcript);
+      } else if (Array.isArray(result)) {
+        for (const alt of result) {
+          if (typeof alt === "string") push(alt);
+          else if (alt && typeof alt.transcript === "string") push(alt.transcript);
+        }
+      }
+    }
+  }
+
+  if (typeof event?.transcript === "string") push(event.transcript);
+  return out;
+}
+
 const getRecognitionErrorCode = (event: any): string =>
   typeof event?.error === "string" ? event.error.toLowerCase() : "unknown";
 
@@ -100,6 +130,7 @@ export class VoiceController {
   private skipNextEndRestart = false;
   private activeTimeout: ReturnType<typeof setTimeout> | null = null;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private passiveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private subscriptions: Array<{ remove: () => void }> = [];
   private lastIntentSignature = "";
   private lastIntentTimestamp = 0;
@@ -189,6 +220,30 @@ export class VoiceController {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
+
+    this.clearPassiveRefresh();
+  }
+
+  /** Schedules a proactive refresh of the continuous passive session (prevents OS kill). */
+  private schedulePassiveRefresh(): void {
+    this.clearPassiveRefresh();
+    this.passiveRefreshTimer = setTimeout(() => {
+      if (!this.running || this.state !== "PASSIVE") return;
+      this.skipNextEndRestart = true;
+      try { this.speechModule?.abort(); } catch { try { this.speechModule?.stop(); } catch {} }
+      setTimeout(() => {
+        if (this.running && this.state === "PASSIVE") {
+          void this.beginRecognitionForCurrentState();
+        }
+      }, RECOGNITION_RESET_DELAY_MS);
+    }, PASSIVE_REFRESH_MS);
+  }
+
+  private clearPassiveRefresh(): void {
+    if (this.passiveRefreshTimer) {
+      clearTimeout(this.passiveRefreshTimer);
+      this.passiveRefreshTimer = null;
+    }
   }
 
   private async stopRecognitionForTransition(): Promise<void> {
@@ -242,15 +297,20 @@ export class VoiceController {
         ? PASSIVE_WAKE_LANGUAGE
         : getSpeechLanguageCode(selectedLanguage);
 
+    const isPassive = this.state === "PASSIVE";
+
     try {
       this.speechModule.start({
         lang: recognitionLanguage,
         interimResults: false,
-        maxAlternatives: 1,
-        continuous: false,
+        // Passive mode: continuous = mic stays open, no ON/OFF cycling sounds
+        // Active mode: single utterance burst
+        continuous: isPassive,
+        // More alternatives in passive = noise-tolerant wake-word detection
+        maxAlternatives: isPassive ? 3 : 1,
         contextualStrings: [
-          "hey vision mitra",
           "vision mitra",
+          "hey vision mitra",
           "navigate to",
           "take me to",
           "stop navigation",
@@ -262,7 +322,12 @@ export class VoiceController {
       });
     } catch (error) {
       console.warn("[VoiceController] Failed to start recognition:", error);
-      this.scheduleRestart(PASSIVE_RESTART_DELAY_MS);
+      this.scheduleRestart(PASSIVE_CONTINUOUS_RESTART_DELAY_MS);
+      return;
+    }
+
+    if (isPassive) {
+      this.schedulePassiveRefresh();
     }
   }
 
@@ -283,11 +348,12 @@ export class VoiceController {
         })
       );
 
-      void this.transitionToPassive(PASSIVE_RESTART_DELAY_MS);
+      void this.transitionToPassive(PASSIVE_CONTINUOUS_RESTART_DELAY_MS);
     }, ACTIVE_LISTENING_TIMEOUT_MS);
   }
 
   private async transitionToPassive(delayMs: number): Promise<void> {
+    this.clearPassiveRefresh();
     this.state = "PASSIVE";
 
     if (this.activeTimeout) {
@@ -300,6 +366,7 @@ export class VoiceController {
   }
 
   private async transitionToActiveListening(): Promise<void> {
+    this.clearPassiveRefresh();
     this.state = "ACTIVE_LISTENING";
     await this.stopRecognitionForTransition();
 
@@ -325,8 +392,10 @@ export class VoiceController {
 
     if (this.handlingIntent) return;
 
+    // Passive uses continuous mode — 'end' means session died unexpectedly → restart fast.
+    // Active uses single-shot — 'end' is normal after one utterance.
     this.scheduleRestart(
-      this.state === "ACTIVE_LISTENING" ? ACTIVE_RESTART_DELAY_MS : PASSIVE_RESTART_DELAY_MS
+      this.state === "PASSIVE" ? PASSIVE_CONTINUOUS_RESTART_DELAY_MS : ACTIVE_RESTART_DELAY_MS
     );
   };
 
@@ -340,46 +409,45 @@ export class VoiceController {
 
     if (this.handlingIntent) return;
 
-    const restartDelay =
-      errorCode === "no-speech"
-        ? this.state === "ACTIVE_LISTENING"
-          ? ACTIVE_NO_SPEECH_DELAY_MS
-          : PASSIVE_NO_SPEECH_DELAY_MS
-        : this.state === "ACTIVE_LISTENING"
-        ? ACTIVE_RESTART_DELAY_MS
-        : PASSIVE_RESTART_DELAY_MS;
+    // In passive continuous mode, errors are always followed by an 'end' event which
+    // will schedule the restart. Scheduling here would cause a double-restart.
+    if (this.state === "PASSIVE") return;
 
-    this.scheduleRestart(
-      restartDelay
-    );
+    const restartDelay = errorCode === "no-speech" ? ACTIVE_NO_SPEECH_DELAY_MS : ACTIVE_RESTART_DELAY_MS;
+    this.scheduleRestart(restartDelay);
   };
 
   private readonly handleRecognitionResult = (event: any): void => {
     if (!this.running) return;
 
-    const transcript = extractTranscript(event).trim();
-    if (!transcript) return;
-
     const isFinal = event?.isFinal ?? true;
     if (!isFinal) return;
 
-    const cleanedTranscript = stripWakePhrase(transcript);
-
     if (this.state === "PASSIVE") {
-      if (containsWakePhrase(transcript)) {
-        const inlineIntent = parseIntent(cleanedTranscript);
-        if (inlineIntent) {
-          void this.executeIntent(inlineIntent);
-          return;
-        }
+      // Check ALL alternatives for wake phrase — noise-tolerant: any matching guess triggers.
+      const transcripts = extractAllTranscripts(event);
+      const wakeTranscript = transcripts.find((t) => containsWakePhrase(t));
+      if (!wakeTranscript) return; // silently ignore — mic stays open (continuous mode)
 
-        void this.transitionToActiveListening();
+      // Wake phrase detected. Try to extract an inline command from the same utterance.
+      const cleanedTranscript = stripWakePhrase(wakeTranscript);
+      const inlineIntent = parseIntent(cleanedTranscript);
+      if (inlineIntent) {
+        void this.executeIntent(inlineIntent);
+        return;
       }
+
+      // Wake word only — switch to active listening for command
+      void this.transitionToActiveListening();
       return;
     }
 
     if (this.state !== "ACTIVE_LISTENING") return;
 
+    const transcript = extractTranscript(event).trim();
+    if (!transcript) return;
+
+    const cleanedTranscript = stripWakePhrase(transcript);
     const parsedIntent = parseIntent(cleanedTranscript || transcript);
     if (!parsedIntent) return;
 
@@ -465,7 +533,7 @@ export class VoiceController {
       console.error("[VoiceController] Intent execution failed:", error);
     } finally {
       this.handlingIntent = false;
-      await this.transitionToPassive(PASSIVE_RESTART_DELAY_MS);
+      await this.transitionToPassive(PASSIVE_CONTINUOUS_RESTART_DELAY_MS);
     }
   }
 
