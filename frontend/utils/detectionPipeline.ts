@@ -24,7 +24,6 @@ import {
   type CorridorObstacle,
   type DistanceBucket,
 } from "@/navigation/corridorMapping";
-import type { MessageKey } from "@/localization/messages";
 
 // ==================== ENUMS ====================
 
@@ -208,7 +207,7 @@ export interface DetectionFrame {
   trackedObjects: TrackedObject[];
   safeDirection: string;
   riskLevel: RiskLevel;
-  audioMessageKey: MessageKey | "";
+  audioMessage: string;
   alertTriggered: boolean;
   alertReason: AlertTriggerEvent | null;
   obstacles: ObstacleEntry[];
@@ -333,7 +332,7 @@ interface RiskContext {
   centerNear: CorridorTrackedObstacle[];
   sideNear: CorridorTrackedObstacle[];
   laneCounters: CorridorLaneCounters;
-  awarenessMessages: MessageKey[];
+  awarenessMessages: string[];
 }
 
 const nowMs = (): number => {
@@ -491,95 +490,113 @@ export class StableRiskDecisionEngine {
 // ==================== ALERT MANAGER ====================
 
 export class AlertManager {
-  private lastAlertMessageKey: MessageKey | "" = "";
+  private lastAlertMessage = "";
 
   generateAlert(
     riskLevel: RiskLevel,
     context: RiskContext,
     safeDirection: string,
     forceNew = false
-  ): { messageKey: MessageKey | ""; event: AlertTriggerEvent | null; priority: AlertPriority } {
-    let messageKey: MessageKey;
+  ): { message: string; event: AlertTriggerEvent | null; priority: AlertPriority } {
+    let message: string;
     let event: AlertTriggerEvent | null;
     let priority: AlertPriority;
 
     if (riskLevel === RiskLevel.CRITICAL) {
-      messageKey = this.buildCriticalMessage(context.centerImmediate, safeDirection);
+      message = this.buildCriticalMessage(context.centerImmediate, safeDirection);
       event = AlertTriggerEvent.OBSTACLE_APPROACHING;
       priority = "critical";
     } else if (riskLevel === RiskLevel.DANGER) {
-      messageKey = this.buildDangerMessage(context.centerNear, safeDirection);
+      message = this.buildDangerMessage(context.centerNear, safeDirection);
       event = AlertTriggerEvent.OBSTACLE_PERSISTS;
       priority = "danger";
     } else if (riskLevel === RiskLevel.CAUTION) {
-      messageKey = this.buildCautionMessage(context.sideNear);
+      message = this.buildCautionMessage(context.sideNear);
       event = AlertTriggerEvent.MOTION_DETECTED;
       priority = "caution";
     } else if (context.awarenessMessages.length > 0) {
-      messageKey = context.awarenessMessages[0];
+      message = context.awarenessMessages.join(". ");
       event = AlertTriggerEvent.MOTION_DETECTED;
       priority = "awareness";
     } else {
-      messageKey = "PATH_CLEAR";
+      message = "Path looks clear. Continue forward.";
       event = AlertTriggerEvent.OBSTACLE_CLEARED;
       priority = "awareness";
     }
 
     // Dedup
-    if (messageKey === this.lastAlertMessageKey && !forceNew) {
-      return { messageKey: "", event: null, priority };
+    if (message === this.lastAlertMessage && !forceNew) {
+      return { message: "", event: null, priority };
     }
-    this.lastAlertMessageKey = messageKey;
-    return { messageKey, event, priority };
+    this.lastAlertMessage = message;
+    return { message, event, priority };
   }
 
   private buildCriticalMessage(
     objects: CorridorTrackedObstacle[],
     direction: string
-  ): MessageKey {
+  ): string {
+    const primary = objects[0]?.type ?? "obstacle";
+    const turnHint: Record<string, string> = {
+      left: "Turn left immediately.",
+      right: "Turn right immediately.",
+      forward: "Back up immediately.",
+      stop: "Stop. You are blocked.",
+    };
     if (direction === "stop") {
-      return "OBSTACLE_BLOCKING";
+      return "Obstacle blocking path. Stop.";
     }
-    return "PERSON_AHEAD";
+    return `${primary} ahead. Move ${direction === "left" ? "slightly left" : "slightly right"}.`;
   }
 
   private buildDangerMessage(
     objects: CorridorTrackedObstacle[],
     direction: string
-  ): MessageKey {
-    if (objects.length === 0) return "DANGER_AHEAD";
-    return direction === "stop" ? "OBSTACLE_BLOCKING" : "DANGER_AHEAD";
+  ): string {
+    if (objects.length === 0) return "Danger ahead. Proceed carefully.";
+    const types = objects
+      .slice(0, 2)
+      .map((o) => o.type)
+      .join(", ");
+    if (direction === "left" || direction === "right") {
+      return `${types} ahead. Move slightly ${direction}.`;
+    }
+    return `Danger: ${types} ahead. Slow down and reassess.`;
   }
 
-  private buildCautionMessage(sideObjects: CorridorTrackedObstacle[]): MessageKey {
+  private buildCautionMessage(sideObjects: CorridorTrackedObstacle[]): string {
     if (sideObjects.length === 0) {
-      return "CAUTION_OBSTACLE";
+      return "Caution. Possible obstacles detected.";
     }
-    return "CAUTION_OBSTACLE";
+
+    const top = sideObjects.slice(0, 2).map((entry) => {
+      return `${entry.type} on ${entry.lane}`;
+    });
+    return `Caution. ${top.join(" and ")}. Keep centered.`;
   }
 }
 
 // ==================== FAIL-SAFE MANAGER ====================
 
 export function getFailsafeResponse(errorType: string): {
-  messageKey: MessageKey;
+  message: string;
   riskLevel: RiskLevel;
 } {
-  const responses: Record<string, { messageKey: MessageKey; riskLevel: RiskLevel }> = {
+  const responses: Record<string, { message: string; riskLevel: RiskLevel }> = {
     image_invalid: {
-      messageKey: "ANALYSIS_UNAVAILABLE",
+      message: "Unable to analyze image. Move slowly.",
       riskLevel: RiskLevel.CAUTION,
     },
     model_unavailable: {
-      messageKey: "DETECTION_LOADING",
+      message: "Detection system loading. Proceed with caution.",
       riskLevel: RiskLevel.CAUTION,
     },
     inference_timeout: {
-      messageKey: "DETECTION_SLOW",
+      message: "Detection taking too long. Use caution ahead.",
       riskLevel: RiskLevel.CAUTION,
     },
     unknown_error: {
-      messageKey: "DETECTION_ERROR_STOP",
+      message: "Detection error. Stop and reassess surroundings.",
       riskLevel: RiskLevel.DANGER,
     },
   };
@@ -772,11 +789,11 @@ export class RobustDetectionPipeline {
 
     // Calibration mutes navigation alerts until camera framing is stable.
     if (this.calibrationState !== "ACTIVE") {
-      let calibrationMessageKey: MessageKey | "" = "";
+      let calibrationMessage = "";
       let alertTriggered = false;
 
       if (this.calibrationPromptPending) {
-        calibrationMessageKey = "CAMERA_CALIBRATING";
+        calibrationMessage = "Camera is calibrating. Please hold steady.";
         this.calibrationPromptPending = false;
         alertTriggered = true;
       }
@@ -788,7 +805,7 @@ export class RobustDetectionPipeline {
         trackedObjects: tracked,
         safeDirection: "forward",
         riskLevel: RiskLevel.SAFE,
-        audioMessageKey: calibrationMessageKey,
+        audioMessage: calibrationMessage,
         alertTriggered,
         alertReason: alertTriggered ? AlertTriggerEvent.NEW_OBSTACLE : null,
         obstacles,
@@ -802,7 +819,7 @@ export class RobustDetectionPipeline {
     }
 
     // 4. Generate alert
-    const { messageKey: alertMessageKey, event: alertEvent, priority: alertPriority } =
+    const { message: alertMessage, event: alertEvent, priority: alertPriority } =
       this.alertManager.generateAlert(
         riskLevel,
         context,
@@ -810,15 +827,15 @@ export class RobustDetectionPipeline {
         shouldTrigger
       );
 
-    let audioMessageKey =
-      alertMessageKey || this.getDefaultMessageKey(riskLevel, safeDirection, context);
+    let audioMessage =
+      alertMessage || this.getDefaultMessage(riskLevel, safeDirection, context);
 
     // Awareness messages must never interrupt critical navigation alerts.
     if (
       alertPriority === "awareness" &&
       (riskLevel === RiskLevel.CRITICAL || riskLevel === RiskLevel.DANGER || riskLevel === RiskLevel.CAUTION)
     ) {
-      audioMessageKey = this.getDefaultMessageKey(riskLevel, safeDirection, context);
+      audioMessage = this.getDefaultMessage(riskLevel, safeDirection, context);
     }
 
     return {
@@ -828,7 +845,7 @@ export class RobustDetectionPipeline {
       trackedObjects: tracked,
       safeDirection,
       riskLevel,
-      audioMessageKey,
+      audioMessage,
       alertTriggered: shouldTrigger,
       alertReason: alertEvent,
       obstacles,
@@ -841,21 +858,21 @@ export class RobustDetectionPipeline {
     };
   }
 
-  private getDefaultMessageKey(risk: RiskLevel, direction: string, context: RiskContext): MessageKey {
+  private getDefaultMessage(risk: RiskLevel, direction: string, context: RiskContext): string {
     switch (risk) {
       case RiskLevel.CRITICAL:
         return direction === "stop"
-          ? "OBSTACLE_BLOCKING"
-          : "PERSON_AHEAD";
+          ? "Obstacle blocking path. Stop."
+          : `Obstacle ahead. Move ${direction}.`;
       case RiskLevel.DANGER:
-        return "DANGER_AHEAD";
+        return `Person ahead. Move slightly ${direction}.`;
       case RiskLevel.CAUTION:
-        return "CAUTION_OBSTACLE";
+        return "Caution. Side obstacle nearby. Keep centered.";
       default:
         if (context.awarenessMessages.length > 0) {
-          return context.awarenessMessages[0];
+          return context.awarenessMessages.join(". ");
         }
-        return "PATH_CLEAR";
+        return "Path clear. Continue forward.";
     }
   }
 
