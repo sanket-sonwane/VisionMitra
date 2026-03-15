@@ -3,11 +3,20 @@ import { useState, useEffect } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import * as Speech from "expo-speech";
 import { useRouter } from "expo-router";
 import axios from "axios";
 import { useStore } from "@/store";
 import { triggerEmergencyFlow, type EmergencyContact, type SmsMode } from "@/utils/sosService";
+import {
+  speakLocalizedMessage,
+  speakLocalizedText,
+  stopLocalizedSpeech,
+} from "@/localization/speech";
+import {
+  callingContactText,
+  contactRemovedText,
+  sosStatusSummaryText,
+} from "@/localization/speechTemplates";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const API_TIMEOUT = 10000;
@@ -72,7 +81,7 @@ export default function Emergency() {
   } = useStore();
 
   useEffect(() => {
-    Speech.speak("Emergency contacts. Add contacts for SOS alerts.");
+    speakLocalizedMessage("EMERGENCY_INTRO");
     loadContacts();
   }, []);
 
@@ -99,14 +108,14 @@ export default function Emergency() {
         setContacts(storedContacts);
         console.log("Using locally stored contacts as fallback");
       } else if (isNetworkError(error)) {
-        Speech.speak("Backend unavailable. You can still add contacts locally.");
+        speakLocalizedMessage("BACKEND_UNAVAILABLE_LOCAL_CONTACTS");
       }
     }
   };
 
   const addContact = async () => {
     if (!newContact.name || !newContact.phone) {
-      Speech.speak("Please enter name and phone number.");
+      speakLocalizedMessage("ENTER_NAME_AND_PHONE");
       return;
     }
 
@@ -144,7 +153,7 @@ export default function Emergency() {
       addEmergencyContact(contactData);
     }
 
-    Speech.speak("Contact added successfully.");
+    speakLocalizedMessage("CONTACT_ADDED_SUCCESS");
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setNewContact({ name: "", phone: "", relationship: "" });
     setShowAddForm(false);
@@ -166,13 +175,13 @@ export default function Emergency() {
       console.warn("Backend delete failed, removed locally:", error);
     }
 
-    Speech.speak(`${name} removed.`);
+    speakLocalizedText(contactRemovedText(name));
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
   const triggerSOS = async () => {
     if (contacts.length === 0) {
-      Speech.speak("Add emergency contacts first.");
+      speakLocalizedMessage("ADD_CONTACTS_FIRST");
       Alert.alert(
         "No Contacts",
         "Please add emergency contacts before using SOS.",
@@ -184,7 +193,7 @@ export default function Emergency() {
     try {
       setSosActive(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Speech.speak("SOS activated. Getting your location and notifying contacts.");
+      speakLocalizedMessage("SOS_ACTIVATED");
 
       const smsMode: SmsMode = process.env.EXPO_PUBLIC_SOS_SMS_MODE === "direct" ? "direct" : "composer";
 
@@ -195,20 +204,13 @@ export default function Emergency() {
         modePreference: smsMode,
       });
 
-      const locationMessage = result.location.locationAvailable
-        ? "Location shared."
-        : "Location unavailable, but alert message prepared.";
-      const backendMessage = result.backendLogged
-        ? "Emergency logged in system."
-        : "Backend unavailable, local SOS still completed.";
-      const notifyMessage =
-        result.notify.modeUsed === "failed"
-          ? "Unable to open SMS automatically. Please call manually."
-          : result.notify.modeUsed === "direct"
-          ? "Direct SMS attempted for emergency contacts."
-          : "Opened SMS composer for emergency contacts.";
-
-      Speech.speak(`${locationMessage} ${notifyMessage} ${backendMessage}`);
+      speakLocalizedText(
+        sosStatusSummaryText(
+          result.location.locationAvailable,
+          result.notify.modeUsed,
+          result.backendLogged
+        )
+      );
 
       if (result.notify.notifyErrors.length > 0) {
         console.warn("SOS notify issues:", result.notify.notifyErrors);
@@ -236,14 +238,14 @@ export default function Emergency() {
     } catch (error) {
       console.error("SOS error:", error);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Speech.speak("Failed to complete SOS flow. Please call emergency contact manually.");
+      speakLocalizedMessage("SOS_FLOW_FAILED");
       setSosActive(false);
     }
   };
 
   const callContact = (phone: string, name: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    Speech.speak(`Calling ${name}`);
+    speakLocalizedText(callingContactText(name));
     Linking.openURL(`tel:${phone}`);
   };
 
@@ -253,7 +255,7 @@ export default function Emergency() {
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => {
-            Speech.stop();
+            stopLocalizedSpeech();
             router.back();
           }}
         >
@@ -268,9 +270,7 @@ export default function Emergency() {
           style={[styles.sosButton, sosActive && styles.sosButtonActive]}
           onPress={triggerSOS}
           disabled={sosActive}
-          onLongPress={() =>
-            Speech.speak("Emergency SOS button. Press to alert all emergency contacts with your location.")
-          }
+          onLongPress={() => speakLocalizedMessage("SOS_BUTTON_HINT")}
         >
           <Ionicons name="alert-circle" size={64} color="#fff" />
           <Text style={styles.sosText}>{sosActive ? "SENDING..." : "SOS"}</Text>
@@ -287,7 +287,9 @@ export default function Emergency() {
               onPress={() => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 setShowAddForm(!showAddForm);
-                Speech.speak(showAddForm ? "Cancel" : "Add new contact");
+                speakLocalizedMessage(
+                  showAddForm ? "CANCEL_LABEL" : "ADD_NEW_CONTACT_LABEL"
+                );
               }}
             >
               <Ionicons name={showAddForm ? "close" : "add"} size={24} color="#2196F3" />
@@ -346,7 +348,7 @@ export default function Emergency() {
                 <TouchableOpacity
                   style={styles.callButton}
                   onPress={() => callContact(contact.phone, contact.name)}
-                  onLongPress={() => Speech.speak(`Call ${contact.name}`)}
+                  onLongPress={() => speakLocalizedText(callingContactText(contact.name))}
                 >
                   <Ionicons name="call" size={24} color="#4CAF50" />
                 </TouchableOpacity>

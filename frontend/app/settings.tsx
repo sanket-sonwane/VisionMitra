@@ -3,12 +3,10 @@ import { useState, useEffect } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import * as Speech from "expo-speech";
 import { useRouter } from "expo-router";
 import { useStore, type AppLanguage } from "@/store";
 import type { MessageKey } from "@/localization/messages";
-import { getSpeechLanguageCode } from "@/localization/speechConfig";
-import { translate } from "@/localization/translate";
+import { speakLocalizedMessage, stopLocalizedSpeech } from "@/localization/speech";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
 
@@ -17,7 +15,6 @@ export default function Settings() {
   const { isOnlineMode, toggleMode, userId, language, setLanguage } = useStore();
   const [speechRate, setSpeechRate] = useState(0.9);
   const [hapticEnabled, setHapticEnabled] = useState(true);
-  const speechLanguageCode = getSpeechLanguageCode(language);
 
   const languageOptions: Array<{
     value: AppLanguage;
@@ -31,19 +28,7 @@ export default function Settings() {
   ];
 
   const speakMessageKey = (messageKey: MessageKey, rate: number = 0.9) => {
-    Speech.speak(translate(messageKey), {
-      language: speechLanguageCode,
-      pitch: 1.0,
-      rate,
-    });
-  };
-
-  const speakText = (text: string, rate: number = 0.9) => {
-    Speech.speak(text, {
-      language: speechLanguageCode,
-      pitch: 1.0,
-      rate,
-    });
+    speakLocalizedMessage(messageKey, { rate });
   };
 
   useEffect(() => {
@@ -61,20 +46,16 @@ export default function Settings() {
     if (nextLanguage === language) return;
     setLanguage(nextLanguage);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    Speech.stop();
-    Speech.speak(translate(confirmationKey), {
-      language: getSpeechLanguageCode(nextLanguage),
-      pitch: 1.0,
-      rate: speechRate,
-    });
+    stopLocalizedSpeech();
+    speakLocalizedMessage(confirmationKey, { rate: speechRate });
   };
 
   const testVoice = () => {
     speakMessageKey("VOICE_TEST_SAMPLE", speechRate);
   };
 
-  const speakDescription = (text: string) => {
-    speakText(text, 0.9);
+  const speakDescription = (messageKey: MessageKey) => {
+    speakMessageKey(messageKey, 0.9);
   };
 
   return (
@@ -83,7 +64,7 @@ export default function Settings() {
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => {
-            Speech.stop();
+            stopLocalizedSpeech();
             router.back();
           }}
         >
@@ -99,11 +80,7 @@ export default function Settings() {
           <TouchableOpacity
             style={styles.settingCard}
             onPress={handleModeToggle}
-            onLongPress={() =>
-              speakDescription(
-                "Toggle between online and offline mode. Online mode uses AI for accurate detection. Offline mode uses basic detection and works without internet."
-              )
-            }
+            onLongPress={() => speakDescription("SETTINGS_MODE_TOGGLE_DESC")}
           >
             <View style={styles.settingIcon}>
               <Ionicons
@@ -169,11 +146,7 @@ export default function Settings() {
                 hapticEnabled ? "HAPTIC_FEEDBACK_DISABLED" : "HAPTIC_FEEDBACK_ENABLED"
               );
             }}
-            onLongPress={() =>
-              speakDescription(
-                "Toggle haptic feedback. Provides vibration alerts for actions and warnings."
-              )
-            }
+            onLongPress={() => speakDescription("SETTINGS_HAPTIC_DESC")}
           >
             <View style={styles.settingIcon}>
               <Ionicons name="hand-left" size={24} color="#2196F3" />
@@ -198,9 +171,7 @@ export default function Settings() {
           <TouchableOpacity
             style={styles.settingCard}
             onPress={testVoice}
-            onLongPress={() =>
-              speakDescription("Test voice output. Press to hear a sample message.")
-            }
+            onLongPress={() => speakDescription("SETTINGS_VOICE_TEST_DESC")}
           >
             <View style={styles.settingIcon}>
               <Ionicons name="volume-high" size={24} color="#FF9800" />
@@ -261,11 +232,7 @@ export default function Settings() {
         <View style={styles.section}>
           <TouchableOpacity
             style={styles.helpButton}
-            onPress={() =>
-              speakText(
-                "Eye Guide is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation."
-              )
-            }
+            onPress={() => speakMessageKey("SETTINGS_HELP_DESCRIPTION")}
           >
             <Ionicons name="help-circle" size={24} color="#2196F3" />
             <Text style={styles.helpText}>How to use Eye Guide</Text>

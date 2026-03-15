@@ -31,7 +31,52 @@ export type MessageKey =
   | "HAPTIC_FEEDBACK_DISABLED"
   | "LANGUAGE_SET_ENGLISH"
   | "LANGUAGE_SET_HINDI"
-  | "LANGUAGE_SET_GUJARATI";
+  | "LANGUAGE_SET_GUJARATI"
+  | "HOME_WELCOME"
+  | "HOME_LIVE_NAV_LABEL"
+  | "HOME_NAVIGATE_LABEL"
+  | "HOME_EMERGENCY_LABEL"
+  | "HOME_SETTINGS_LABEL"
+  | "HOME_LIVE_NAV_DESC"
+  | "HOME_NAVIGATE_DESC"
+  | "HOME_EMERGENCY_DESC"
+  | "HOME_SETTINGS_DESC"
+  | "NAVIGATION_INTRO"
+  | "VOICE_INPUT_FAILED"
+  | "LOCATION_PERMISSION_REQUIRED"
+  | "LOCATION_ACQUIRED"
+  | "LOCATION_UNAVAILABLE"
+  | "ENTER_DESTINATION"
+  | "GETTING_LOCATION_FIRST"
+  | "SEARCHING_DESTINATION"
+  | "DESTINATION_NOT_FOUND"
+  | "DESTINATION_FIND_FAILED"
+  | "VOICE_INPUT_UNAVAILABLE_BUILD"
+  | "MIC_PERMISSION_REQUIRED"
+  | "VOICE_INPUT_UNAVAILABLE_DEVICE"
+  | "LISTENING_FOR_DESTINATION"
+  | "VOICE_INPUT_START_FAILED"
+  | "CURRENT_LOCATION_NOT_AVAILABLE"
+  | "COMPUTING_ROUTE"
+  | "JOURNEY_PLAN_FAILED"
+  | "JOURNEY_PLAN_NOT_AVAILABLE"
+  | "NAVIGATION_START_FAILED"
+  | "TAP_TO_STOP_LISTENING"
+  | "TAP_TO_SPEAK_DESTINATION"
+  | "EMERGENCY_INTRO"
+  | "BACKEND_UNAVAILABLE_LOCAL_CONTACTS"
+  | "ENTER_NAME_AND_PHONE"
+  | "CONTACT_ADDED_SUCCESS"
+  | "ADD_CONTACTS_FIRST"
+  | "SOS_ACTIVATED"
+  | "SOS_FLOW_FAILED"
+  | "SOS_BUTTON_HINT"
+  | "CANCEL_LABEL"
+  | "ADD_NEW_CONTACT_LABEL"
+  | "SETTINGS_MODE_TOGGLE_DESC"
+  | "SETTINGS_HAPTIC_DESC"
+  | "SETTINGS_VOICE_TEST_DESC"
+  | "SETTINGS_HELP_DESCRIPTION";
 
 type MessageDictionary = Record<MessageKey, Record<AppLanguage, string>>;
 
@@ -190,5 +235,230 @@ export const messages: MessageDictionary = {
     en: "Language set to Gujarati.",
     hi: "भाषा गुजराती पर सेट की गई।",
     gu: "ભાષા ગુજરાતી પર સેટ થઈ.",
+  },
+  HOME_WELCOME: {
+    en: "Welcome to VisionMitra. Your AI powered navigation assistant for safe mobility.",
+    hi: "विजनमित्रा में आपका स्वागत है। सुरक्षित गतिशीलता के लिए आपका AI आधारित नेविगेशन सहायक।",
+    gu: "વિઝનમિત્રામાં આપનું સ્વાગત છે. સુરક્ષિત ગતિશીલતા માટે તમારું AI આધારિત નેવિગેશન સહાયક.",
+  },
+  HOME_LIVE_NAV_LABEL: {
+    en: "Live Navigation Camera",
+    hi: "लाइव नेविगेशन कैमरा",
+    gu: "લાઈવ નેવિગેશન કેમેરા",
+  },
+  HOME_NAVIGATE_LABEL: {
+    en: "Navigation",
+    hi: "नेविगेशन",
+    gu: "નેવિગેશન",
+  },
+  HOME_EMERGENCY_LABEL: {
+    en: "Emergency SOS",
+    hi: "आपातकालीन SOS",
+    gu: "આપાતકાલીન SOS",
+  },
+  HOME_SETTINGS_LABEL: {
+    en: "Settings",
+    hi: "सेटिंग्स",
+    gu: "સેટિંગ્સ",
+  },
+  HOME_LIVE_NAV_DESC: {
+    en: "Live Navigation Camera. Opens real-time obstacle detection.",
+    hi: "लाइव नेविगेशन कैमरा। रियल-टाइम बाधा पहचान खोलता है।",
+    gu: "લાઈવ નેવિગેશન કેમેરા. રિયલ-ટાઈમ અવરોધ શોધ શરૂ કરે છે.",
+  },
+  HOME_NAVIGATE_DESC: {
+    en: "Navigation. Plan route to destination.",
+    hi: "नेविगेशन। गंतव्य तक मार्ग की योजना बनाएं।",
+    gu: "નેવિગેશન. ગંતવ્ય સુધીનો માર્ગ બનાવો.",
+  },
+  HOME_EMERGENCY_DESC: {
+    en: "Emergency SOS. Quick access to emergency contacts.",
+    hi: "आपातकालीन SOS। आपातकालीन संपर्कों तक त्वरित पहुंच।",
+    gu: "આપાતકાલીન SOS. આપાતકાલીન સંપર્કો સુધી ઝડપી પહોંચ.",
+  },
+  HOME_SETTINGS_DESC: {
+    en: "Settings. Configure app preferences and profile.",
+    hi: "सेटिंग्स। ऐप प्राथमिकताएँ और प्रोफ़ाइल कॉन्फ़िगर करें।",
+    gu: "સેટિંગ્સ. એપ પસંદગીઓ અને પ્રોફાઇલ ગોઠવો.",
+  },
+  NAVIGATION_INTRO: {
+    en: "Navigation. Enter destination or select nearby transport stops.",
+    hi: "नेविगेशन। गंतव्य दर्ज करें या पास के परिवहन स्टॉप चुनें।",
+    gu: "નેવિગેશન. ગંતવ્ય દાખલ કરો અથવા નજીકના પરિવહન સ્ટોપ પસંદ કરો.",
+  },
+  VOICE_INPUT_FAILED: {
+    en: "Voice input failed. Please try again.",
+    hi: "वॉइस इनपुट विफल हुआ। कृपया फिर से प्रयास करें।",
+    gu: "વોઇસ ઇનપુટ નિષ્ફળ ગયું. કૃપા કરીને ફરી પ્રયાસ કરો.",
+  },
+  LOCATION_PERMISSION_REQUIRED: {
+    en: "Location permission required for navigation.",
+    hi: "नेविगेशन के लिए लोकेशन अनुमति आवश्यक है।",
+    gu: "નેવિગેશન માટે સ્થાન પરવાનગી જરૂરી છે.",
+  },
+  LOCATION_ACQUIRED: {
+    en: "Location acquired.",
+    hi: "लोकेशन प्राप्त हुई।",
+    gu: "સ્થાન પ્રાપ્ત થયું.",
+  },
+  LOCATION_UNAVAILABLE: {
+    en: "Unable to get current location.",
+    hi: "वर्तमान लोकेशन प्राप्त नहीं हो सकी।",
+    gu: "વર્તમાન સ્થાન મેળવી શકાયું નથી.",
+  },
+  ENTER_DESTINATION: {
+    en: "Please enter a destination.",
+    hi: "कृपया एक गंतव्य दर्ज करें।",
+    gu: "કૃપા કરીને ગંતવ્ય દાખલ કરો.",
+  },
+  GETTING_LOCATION_FIRST: {
+    en: "Getting your location first.",
+    hi: "पहले आपकी लोकेशन प्राप्त की जा रही है।",
+    gu: "પહેલાં તમારું સ્થાન મેળવી રહ્યા છીએ.",
+  },
+  SEARCHING_DESTINATION: {
+    en: "Searching for destination.",
+    hi: "गंतव्य खोजा जा रहा है।",
+    gu: "ગંતવ્ય શોધી રહ્યા છીએ.",
+  },
+  DESTINATION_NOT_FOUND: {
+    en: "Destination not found. Please try a different search.",
+    hi: "गंतव्य नहीं मिला। कृपया अलग खोज का प्रयास करें।",
+    gu: "ગંતવ્ય મળ્યું નથી. કૃપા કરીને બીજી શોધ અજમાવો.",
+  },
+  DESTINATION_FIND_FAILED: {
+    en: "Unable to find destination. Please try again.",
+    hi: "गंतव्य नहीं मिल पाया। कृपया फिर से प्रयास करें।",
+    gu: "ગંતવ્ય મળી શક્યું નથી. કૃપા કરીને ફરી પ્રયાસ કરો.",
+  },
+  VOICE_INPUT_UNAVAILABLE_BUILD: {
+    en: "Voice input is unavailable in this app build.",
+    hi: "इस ऐप बिल्ड में वॉइस इनपुट उपलब्ध नहीं है।",
+    gu: "આ એપ બિલ્ડમાં વોઇસ ઇનપુટ ઉપલબ્ધ નથી.",
+  },
+  MIC_PERMISSION_REQUIRED: {
+    en: "Microphone permission is required for voice destination input.",
+    hi: "वॉइस गंतव्य इनपुट के लिए माइक्रोफोन अनुमति आवश्यक है।",
+    gu: "વોઇસ ગંતવ્ય ઇનપુટ માટે માઇક્રોફોન પરવાનગી જરૂરી છે.",
+  },
+  VOICE_INPUT_UNAVAILABLE_DEVICE: {
+    en: "Voice input is not available on this device.",
+    hi: "इस डिवाइस पर वॉइस इनपुट उपलब्ध नहीं है।",
+    gu: "આ ઉપકરણ પર વોઇસ ઇનપુટ ઉપલબ્ધ નથી.",
+  },
+  LISTENING_FOR_DESTINATION: {
+    en: "Listening. Please say your destination.",
+    hi: "सुन रहा हूँ। कृपया अपना गंतव्य बोलें।",
+    gu: "સાંભળી રહ્યા છીએ. કૃપા કરીને તમારું ગંતવ્ય બોલો.",
+  },
+  VOICE_INPUT_START_FAILED: {
+    en: "Unable to start voice input.",
+    hi: "वॉइस इनपुट शुरू नहीं हो सका।",
+    gu: "વોઇસ ઇનપુટ શરૂ કરી શકાયું નથી.",
+  },
+  CURRENT_LOCATION_NOT_AVAILABLE: {
+    en: "Current location not available.",
+    hi: "वर्तमान लोकेशन उपलब्ध नहीं है।",
+    gu: "વર્તમાન સ્થાન ઉપલબ્ધ નથી.",
+  },
+  COMPUTING_ROUTE: {
+    en: "Computing optimal route.",
+    hi: "सर्वोत्तम मार्ग की गणना की जा रही है।",
+    gu: "શ્રેષ્ઠ માર્ગની ગણતરી કરી રહ્યા છીએ.",
+  },
+  JOURNEY_PLAN_FAILED: {
+    en: "Unable to plan journey. Please try again.",
+    hi: "यात्रा योजना नहीं बन सकी। कृपया फिर से प्रयास करें।",
+    gu: "મુસાફરીની યોજના બની નથી. કૃપા કરીને ફરી પ્રયાસ કરો.",
+  },
+  JOURNEY_PLAN_NOT_AVAILABLE: {
+    en: "Journey plan not available.",
+    hi: "यात्रा योजना उपलब्ध नहीं है।",
+    gu: "મુસાફરીની યોજના ઉપલબ્ધ નથી.",
+  },
+  NAVIGATION_START_FAILED: {
+    en: "Failed to start navigation. Please try again.",
+    hi: "नेविगेशन शुरू नहीं हो सका। कृपया फिर से प्रयास करें।",
+    gu: "નેવિગેશન શરૂ થઈ શક્યું નથી. કૃપા કરીને ફરી પ્રયાસ કરો.",
+  },
+  TAP_TO_STOP_LISTENING: {
+    en: "Tap to stop listening.",
+    hi: "सुनना बंद करने के लिए टैप करें।",
+    gu: "સાંભળવું બંધ કરવા ટેપ કરો.",
+  },
+  TAP_TO_SPEAK_DESTINATION: {
+    en: "Tap to speak your destination.",
+    hi: "अपना गंतव्य बोलने के लिए टैप करें।",
+    gu: "તમારું ગંતવ્ય બોલવા ટેપ કરો.",
+  },
+  EMERGENCY_INTRO: {
+    en: "Emergency contacts. Add contacts for SOS alerts.",
+    hi: "आपातकालीन संपर्क। SOS अलर्ट के लिए संपर्क जोड़ें।",
+    gu: "આપાતકાલીન સંપર્કો. SOS એલર્ટ માટે સંપર્ક ઉમેરો.",
+  },
+  BACKEND_UNAVAILABLE_LOCAL_CONTACTS: {
+    en: "Backend unavailable. You can still add contacts locally.",
+    hi: "बैकएंड उपलब्ध नहीं है। आप फिर भी स्थानीय रूप से संपर्क जोड़ सकते हैं।",
+    gu: "બેકએન્ડ ઉપલબ્ધ નથી. તમે હજુપણ સ્થાનિક રીતે સંપર્ક ઉમેરી શકો છો.",
+  },
+  ENTER_NAME_AND_PHONE: {
+    en: "Please enter name and phone number.",
+    hi: "कृपया नाम और फोन नंबर दर्ज करें।",
+    gu: "કૃપા કરીને નામ અને ફોન નંબર દાખલ કરો.",
+  },
+  CONTACT_ADDED_SUCCESS: {
+    en: "Contact added successfully.",
+    hi: "संपर्क सफलतापूर्वक जोड़ा गया।",
+    gu: "સંપર્ક સફળતાપૂર્વક ઉમેરાયો.",
+  },
+  ADD_CONTACTS_FIRST: {
+    en: "Add emergency contacts first.",
+    hi: "पहले आपातकालीन संपर्क जोड़ें।",
+    gu: "પહેલાં આપાતકાલીન સંપર્કો ઉમેરો.",
+  },
+  SOS_ACTIVATED: {
+    en: "SOS activated. Getting your location and notifying contacts.",
+    hi: "SOS सक्रिय हुआ। आपकी लोकेशन लेकर संपर्कों को सूचित किया जा रहा है।",
+    gu: "SOS સક્રિય થયું. તમારું સ્થાન મેળવી સંપર્કોને જાણ કરી રહ્યા છીએ.",
+  },
+  SOS_FLOW_FAILED: {
+    en: "Failed to complete SOS flow. Please call emergency contact manually.",
+    hi: "SOS प्रक्रिया पूरी नहीं हो सकी। कृपया आपातकालीन संपर्क को मैन्युअली कॉल करें।",
+    gu: "SOS પ્રક્રિયા પૂર્ણ થઈ નથી. કૃપા કરીને આપાતકાલીન સંપર્કને હાથેથી કૉલ કરો.",
+  },
+  SOS_BUTTON_HINT: {
+    en: "Emergency SOS button. Press to alert all emergency contacts with your location.",
+    hi: "आपातकालीन SOS बटन। अपनी लोकेशन के साथ सभी आपातकालीन संपर्कों को अलर्ट करने के लिए दबाएँ।",
+    gu: "આપાતકાલીન SOS બટન. તમારા સ્થાન સાથે બધા આપાતકાલીન સંપર્કોને એલર્ટ કરવા દબાવો.",
+  },
+  CANCEL_LABEL: {
+    en: "Cancel",
+    hi: "रद्द करें",
+    gu: "રદ કરો",
+  },
+  ADD_NEW_CONTACT_LABEL: {
+    en: "Add new contact",
+    hi: "नया संपर्क जोड़ें",
+    gu: "નવો સંપર્ક ઉમેરો",
+  },
+  SETTINGS_MODE_TOGGLE_DESC: {
+    en: "Toggle between online and offline mode. Online mode uses AI for accurate detection. Offline mode uses basic detection and works without internet.",
+    hi: "ऑनलाइन और ऑफलाइन मोड के बीच बदलें। ऑनलाइन मोड सटीक पहचान के लिए AI का उपयोग करता है। ऑफलाइन मोड बुनियादी पहचान का उपयोग करता है और इंटरनेट के बिना काम करता है।",
+    gu: "ઓનલાઇન અને ઓફલાઇન મોડ વચ્ચે બદલો. ઓનલાઈન મોડ ચોક્કસ શોધ માટે AI નો ઉપયોગ કરે છે. ઓફલાઇન મોડ મૂળભૂત શોધનો ઉપયોગ કરે છે અને ઇન્ટરનેટ વગર કામ કરે છે.",
+  },
+  SETTINGS_HAPTIC_DESC: {
+    en: "Toggle haptic feedback. Provides vibration alerts for actions and warnings.",
+    hi: "हैप्टिक फीडबैक टॉगल करें। यह क्रियाओं और चेतावनियों के लिए कंपन अलर्ट देता है।",
+    gu: "હેપ્ટિક ફીડબેક ટૉગલ કરો. તે ક્રિયાઓ અને ચેતવણીઓ માટે કંપન એલર્ટ આપે છે.",
+  },
+  SETTINGS_VOICE_TEST_DESC: {
+    en: "Test voice output. Press to hear a sample message.",
+    hi: "वॉइस आउटपुट जांचें। नमूना संदेश सुनने के लिए दबाएँ।",
+    gu: "વોઇસ આઉટપુટ ચકાસો. નમૂના સંદેશ માટે દબાવો.",
+  },
+  SETTINGS_HELP_DESCRIPTION: {
+    en: "Eye Guide is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation.",
+    hi: "आई गाइड दृष्टिबाधित उपयोगकर्ताओं के लिए AI आधारित नेविगेशन सहायक है। यह रियल-टाइम बाधा पहचान, वॉइस मार्गदर्शन, आपातकालीन SOS और पास के परिवहन स्टॉप खोजने में मदद देता है। सटीक AI पहचान के लिए ऑनलाइन मोड या बुनियादी नेविगेशन के लिए ऑफलाइन मोड उपयोग करें।",
+    gu: "આઈ ગાઇડ દૃષ્ટિબાધિત વપરાશકર્તાઓ માટે AI આધારિત નેવિગેશન સહાયક છે. તે રિયલ-ટાઈમ અવરોધ શોધ, અવાજ માર્ગદર્શન, આપાતકાલીન SOS અને નજીકના પરિવહન સ્ટોપ શોધવામાં મદદ કરે છે. ચોક્કસ AI શોધ માટે ઓનલાઈન મોડ અથવા મૂળભૂત નેવિગેશન માટે ઓફલાઇન મોડ વાપરો.",
   },
 };

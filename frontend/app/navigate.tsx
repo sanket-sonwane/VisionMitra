@@ -3,12 +3,24 @@ import { useState, useEffect, useRef } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import * as Speech from "expo-speech";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
 import { requireOptionalNativeModule } from "expo-modules-core";
 import axios from "axios";
 import { useStore } from "@/store";
+import { getSpeechLanguageCode } from "@/localization/speechConfig";
+import {
+  speakLocalizedMessage,
+  speakLocalizedText,
+  stopLocalizedSpeech,
+} from "@/localization/speech";
+import {
+  destinationFoundText,
+  destinationSetText,
+  directJourneyPlanText,
+  navigationStartedText,
+  segmentedJourneyPlanText,
+} from "@/localization/speechTemplates";
 import {
   planJourney,
   calculateDistance,
@@ -57,10 +69,10 @@ export default function Navigate() {
   const [voiceInputAvailable, setVoiceInputAvailable] = useState(true);
   const [voiceModuleMissing, setVoiceModuleMissing] = useState(false);
   const speechRecognitionModuleRef = useRef<SpeechRecognitionModuleLike | null>(null);
-  const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
+  const { userId, isOnlineMode, currentSession, setCurrentSession, language } = useStore();
 
   useEffect(() => {
-    Speech.speak("Navigation. Enter destination or select nearby transport stops.");
+    speakLocalizedMessage("NAVIGATION_INTRO");
     getCurrentLocation();
     // Clear cache on mount
     clearStopCache();
@@ -90,14 +102,14 @@ export default function Navigate() {
       if (!transcript) return;
       setDestinationQuery(transcript);
       if (event?.isFinal) {
-        Speech.speak(`Destination set to ${transcript}`);
+        speakLocalizedText(destinationSetText(transcript));
       }
     });
 
     const errorSub = speechRecognitionModule.addListener?.("error", (event: any) => {
       setIsListeningDestination(false);
       console.warn("Destination voice input error:", event?.error, event?.message);
-      Speech.speak("Voice input failed. Please try again.");
+      speakLocalizedMessage("VOICE_INPUT_FAILED");
     });
 
     return () => {
@@ -126,7 +138,7 @@ export default function Navigate() {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") {
-        Speech.speak("Location permission required for navigation.");
+        speakLocalizedMessage("LOCATION_PERMISSION_REQUIRED");
         return;
       }
 
@@ -137,22 +149,22 @@ export default function Navigate() {
       };
       setCurrentLocation(coords);
 
-      Speech.speak("Location acquired.");
+      speakLocalizedMessage("LOCATION_ACQUIRED");
     } catch (error) {
       console.error("Location error:", error);
-      Speech.speak("Unable to get current location.");
+      speakLocalizedMessage("LOCATION_UNAVAILABLE");
     }
   };
 
   // Geocode destination query using Nominatim (OpenStreetMap)
   const geocodeDestination = async () => {
     if (!destinationQuery.trim()) {
-      Speech.speak("Please enter a destination.");
+      speakLocalizedMessage("ENTER_DESTINATION");
       return;
     }
 
     if (!currentLocation) {
-      Speech.speak("Getting your location first.");
+      speakLocalizedMessage("GETTING_LOCATION_FIRST");
       await getCurrentLocation();
       return;
     }
@@ -161,7 +173,7 @@ export default function Navigate() {
     setPlanningJourney(true);
     
     try {
-      Speech.speak("Searching for destination.");
+      speakLocalizedMessage("SEARCHING_DESTINATION");
       
       // Use Nominatim for geocoding
       const response = await axios.get("https://nominatim.openstreetmap.org/search", {
@@ -178,7 +190,7 @@ export default function Navigate() {
       });
 
       if (!response.data || response.data.length === 0) {
-        Speech.speak("Destination not found. Please try a different search.");
+        speakLocalizedMessage("DESTINATION_NOT_FOUND");
         setPlanningJourney(false);
         setLoading(false);
         return;
@@ -199,14 +211,14 @@ export default function Navigate() {
         destCoords.longitude
       );
 
-      Speech.speak(`Found ${result.display_name}. Distance ${formatDistance(distance)}. Planning journey.`);
+      speakLocalizedText(destinationFoundText(result.display_name, formatDistance(distance)));
 
       // Plan the journey
       await planAndExecuteJourney(destCoords, result.display_name);
       
     } catch (error) {
       console.error("Geocoding error:", error);
-      Speech.speak("Unable to find destination. Please try again.");
+      speakLocalizedMessage("DESTINATION_FIND_FAILED");
       setPlanningJourney(false);
       setLoading(false);
     }
@@ -226,7 +238,7 @@ export default function Navigate() {
         "Speech recognition requires a development build. Expo Go does not include this native module.",
         [{ text: "OK" }]
       );
-      Speech.speak("Voice input is unavailable in this app build.");
+      speakLocalizedMessage("VOICE_INPUT_UNAVAILABLE_BUILD");
       return;
     }
 
@@ -241,26 +253,26 @@ export default function Navigate() {
     try {
       const permission = await speechRecognitionModule.requestPermissionsAsync();
       if (!permission.granted) {
-        Speech.speak("Microphone permission is required for voice destination input.");
+        speakLocalizedMessage("MIC_PERMISSION_REQUIRED");
         return;
       }
 
       if (!speechRecognitionModule.isRecognitionAvailable()) {
         setVoiceInputAvailable(false);
-        Speech.speak("Voice input is not available on this device.");
+        speakLocalizedMessage("VOICE_INPUT_UNAVAILABLE_DEVICE");
         return;
       }
 
-      Speech.speak("Listening. Please say your destination.");
+      speakLocalizedMessage("LISTENING_FOR_DESTINATION");
       speechRecognitionModule.start({
-        lang: "en-IN",
+        lang: getSpeechLanguageCode(language),
         interimResults: true,
         maxAlternatives: 1,
         contextualStrings: ["Pune", "PMPML", "Station", "Bus stop", "Metro"],
       });
     } catch (error) {
       console.error("Destination voice input start error:", error);
-      Speech.speak("Unable to start voice input.");
+      speakLocalizedMessage("VOICE_INPUT_START_FAILED");
     }
   };
 
@@ -270,7 +282,7 @@ export default function Navigate() {
     destinationName: string
   ) => {
     if (!currentLocation) {
-      Speech.speak("Current location not available.");
+      speakLocalizedMessage("CURRENT_LOCATION_NOT_AVAILABLE");
       setPlanningJourney(false);
       setLoading(false);
       return;
@@ -278,7 +290,7 @@ export default function Navigate() {
 
     try {
       setPlanningJourney(true);
-      Speech.speak("Computing optimal route.");
+      speakLocalizedMessage("COMPUTING_ROUTE");
 
       const plan = await planJourney(currentLocation, destination);
       setJourneyPlan(plan);
@@ -286,12 +298,21 @@ export default function Navigate() {
 
       // Announce journey plan
       if (plan.journey_type === "DIRECT_WALK") {
-        Speech.speak(
-          `Direct walk recommended. Total distance ${formatDistance(plan.total_distance)}. Estimated time ${formatTime(plan.estimated_time)}.`
+        speakLocalizedText(
+          directJourneyPlanText(
+            formatDistance(plan.total_distance),
+            formatTime(plan.estimated_time)
+          )
         );
       } else {
-        Speech.speak(
-          `Journey planned with ${plan.segments.length} segments. Using ${plan.selected_origin_stop?.name} to ${plan.selected_destination_stop?.name}. Total distance ${formatDistance(plan.total_distance)}. Estimated time ${formatTime(plan.estimated_time)}.`
+        speakLocalizedText(
+          segmentedJourneyPlanText(
+            plan.segments.length,
+            plan.selected_origin_stop?.name || "-",
+            plan.selected_destination_stop?.name || "-",
+            formatDistance(plan.total_distance),
+            formatTime(plan.estimated_time)
+          )
         );
       }
 
@@ -299,7 +320,7 @@ export default function Navigate() {
       
     } catch (error) {
       console.error("Journey planning error:", error);
-      Speech.speak("Unable to plan journey. Please try again.");
+      speakLocalizedMessage("JOURNEY_PLAN_FAILED");
       setJourneyPlan(null);
     } finally {
       setPlanningJourney(false);
@@ -310,7 +331,7 @@ export default function Navigate() {
   // Start navigation with journey plan
   const startNavigationWithPlan = async () => {
     if (!journeyPlan || !currentLocation || !destinationCoords) {
-      Speech.speak("Journey plan not available.");
+      speakLocalizedMessage("JOURNEY_PLAN_NOT_AVAILABLE");
       return;
     }
 
@@ -350,13 +371,13 @@ export default function Navigate() {
       }
 
       setCurrentSession(sessionData);
-      Speech.speak(`Navigation started. ${generateAudioInstruction(journeyPlan.segments[0])}`);
+      speakLocalizedText(navigationStartedText(generateAudioInstruction(journeyPlan.segments[0])));
       
       // Open camera for live navigation
       router.push("/camera");
     } catch (error) {
       console.error("Navigation error:", error);
-      Speech.speak("Failed to start navigation. Please try again.");
+      speakLocalizedMessage("NAVIGATION_START_FAILED");
     } finally {
       setIsNavigating(false);
     }
@@ -368,7 +389,7 @@ export default function Navigate() {
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => {
-            Speech.stop();
+            stopLocalizedSpeech();
             router.back();
           }}
         >
@@ -422,10 +443,10 @@ export default function Navigate() {
               onPress={handleDestinationVoiceInput}
               disabled={!voiceInputAvailable || planningJourney}
               onLongPress={() =>
-                Speech.speak(
+                speakLocalizedMessage(
                   isListeningDestination
-                    ? "Tap to stop listening."
-                    : "Tap to speak your destination."
+                    ? "TAP_TO_STOP_LISTENING"
+                    : "TAP_TO_SPEAK_DESTINATION"
                 )
               }
             >

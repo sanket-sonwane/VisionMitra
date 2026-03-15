@@ -4,15 +4,18 @@ import { useState, useEffect, useRef } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import * as Speech from "expo-speech";
 import * as Location from "expo-location";
 import * as ImageManipulator from "expo-image-manipulator";
 import { useRouter } from "expo-router";
 import axios from "axios";
 import { useStore } from "@/store";
 import type { MessageKey } from "@/localization/messages";
-import { getSpeechLanguageCode } from "@/localization/speechConfig";
 import { isMessageKey, translate } from "@/localization/translate";
+import {
+  speakLocalizedMessage,
+  speakLocalizedText,
+  stopLocalizedSpeech,
+} from "@/localization/speech";
 import {
   calculateDistance,
   calculateBearing,
@@ -56,23 +59,14 @@ export default function Camera() {
   const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [modelStatus, setModelStatus] = useState<string>("loading");
   const [pictureSize, setPictureSize] = useState<string | undefined>("640x480");
-  const { userId, isOnlineMode, currentSession, setCurrentSession, language } = useStore();
-  const speechLanguageCode = getSpeechLanguageCode(language);
+  const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
   const speakMessageKey = (messageKey: MessageKey, rate: number = 1.0) => {
-    Speech.speak(translate(messageKey), {
-      language: speechLanguageCode,
-      pitch: 1.0,
-      rate,
-    });
+    speakLocalizedMessage(messageKey, { rate });
   };
 
   const speakText = (text: string, rate: number = 1.0) => {
-    Speech.speak(text, {
-      language: speechLanguageCode,
-      pitch: 1.0,
-      rate,
-    });
+    speakLocalizedText(text, { rate });
   };
 
   const resolveAlertMessageKey = (
@@ -124,7 +118,7 @@ export default function Camera() {
         headingSubscription.current.remove();
       }
       clearPipeline(currentSession?.id || "default");
-      Speech.stop();
+      stopLocalizedSpeech();
     };
   }, []);
 
@@ -725,7 +719,7 @@ export default function Camera() {
           style={styles.backButton}
           onPress={() => {
             stopContinuousAnalysis();
-            Speech.stop();
+            stopLocalizedSpeech();
             router.back();
           }}
         >
