@@ -3,12 +3,12 @@ import { useState, useEffect } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
+import * as Speech from "expo-speech";
 import { useRouter } from "expo-router";
-import { useStore, type AppLanguage } from "@/store";
-import type { MessageKey } from "@/localization/messages";
-import { speakLocalizedMessage, stopLocalizedSpeech } from "@/localization/speech";
+import { useStore } from "@/store";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
+import { getSpeechLanguageCode } from "@/localization/speechConfig";
 
 export default function Settings() {
   const router = useRouter();
@@ -21,56 +21,53 @@ export default function Settings() {
     voiceCommandsEnabled,
     setVoiceCommandsEnabled,
   } = useStore();
-  const [speechRate, setSpeechRate] = useState(0.9);
+  const speechRate = 0.9;
   const [hapticEnabled, setHapticEnabled] = useState(true);
 
-  const languageOptions: Array<{
-    value: AppLanguage;
-    label: string;
-    nativeLabel: string;
-    confirmationKey: MessageKey;
-  }> = [
-    { value: "en", label: "English", nativeLabel: "English", confirmationKey: "LANGUAGE_SET_ENGLISH" },
-    { value: "hi", label: "Hindi", nativeLabel: "हिंदी", confirmationKey: "LANGUAGE_SET_HINDI" },
-    { value: "gu", label: "Gujarati", nativeLabel: "ગુજરાતી", confirmationKey: "LANGUAGE_SET_GUJARATI" },
-  ];
-
-  const speakMessageKey = (messageKey: MessageKey, rate: number = 0.9) => {
-    speakLocalizedMessage(messageKey, { rate });
-  };
-
   useEffect(() => {
-    speakMessageKey("SETTINGS_INTRO");
+    Speech.speak("Settings. Configure your preferences.");
   }, []);
 
   const handleModeToggle = () => {
-    const nextOnlineMode = !isOnlineMode;
     toggleMode();
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    speakMessageKey(nextOnlineMode ? "MODE_SWITCHED_ONLINE" : "MODE_SWITCHED_OFFLINE");
+    const newMode = !isOnlineMode ? "online" : "offline";
+    Speech.speak(`Switched to ${newMode} mode.`);
   };
 
-  const handleLanguageSelect = (nextLanguage: AppLanguage, confirmationKey: MessageKey) => {
-    if (nextLanguage === language) return;
-    setLanguage(nextLanguage);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    stopLocalizedSpeech();
-    speakLocalizedMessage(confirmationKey, { rate: speechRate });
-  };
-
-  const handleVoiceCommandToggle = (nextValue?: boolean) => {
-    const enabled = typeof nextValue === "boolean" ? nextValue : !voiceCommandsEnabled;
-    setVoiceCommandsEnabled(enabled);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    speakMessageKey(enabled ? "VOICE_COMMANDS_ENABLED" : "VOICE_COMMANDS_DISABLED");
+  const handleVoiceCommandsToggle = () => {
+    const nextValue = !voiceCommandsEnabled;
+    setVoiceCommandsEnabled(nextValue);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Speech.speak(nextValue ? "Voice commands enabled." : "Voice commands disabled.");
   };
 
   const testVoice = () => {
-    speakMessageKey("VOICE_TEST_SAMPLE", speechRate);
+    Speech.speak("This is a voice test. Adjust speech rate in settings.", {
+      language: getSpeechLanguageCode(language),
+      pitch: 1.0,
+      rate: speechRate,
+    });
   };
 
-  const speakDescription = (messageKey: MessageKey) => {
-    speakMessageKey(messageKey, 0.9);
+  const updateLanguage = (nextLanguage: "en" | "hi" | "gu") => {
+    setLanguage(nextLanguage);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const languageFeedback =
+      nextLanguage === "hi"
+        ? "भाषा हिंदी में बदल दी गई है।"
+        : nextLanguage === "gu"
+        ? "ભાષા ગુજરાતી પર સેટ કરવામાં આવી છે."
+        : "Language set to English.";
+    Speech.speak(languageFeedback, {
+      language: getSpeechLanguageCode(nextLanguage),
+      pitch: 1.0,
+      rate: 0.95,
+    });
+  };
+
+  const speakDescription = (text: string) => {
+    Speech.speak(text, { language: "en", pitch: 1.0, rate: 0.9 });
   };
 
   return (
@@ -79,7 +76,7 @@ export default function Settings() {
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => {
-            stopLocalizedSpeech();
+            Speech.stop();
             router.back();
           }}
         >
@@ -95,7 +92,11 @@ export default function Settings() {
           <TouchableOpacity
             style={styles.settingCard}
             onPress={handleModeToggle}
-            onLongPress={() => speakDescription("SETTINGS_MODE_TOGGLE_DESC")}
+            onLongPress={() =>
+              speakDescription(
+                "Toggle between online and offline mode. Online mode uses AI for accurate detection. Offline mode uses basic detection and works without internet."
+              )
+            }
           >
             <View style={styles.settingIcon}>
               <Ionicons
@@ -124,56 +125,59 @@ export default function Settings() {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Language</Text>
-          {languageOptions.map((option) => (
-            <TouchableOpacity
-              key={option.value}
-              style={styles.settingCard}
-              onPress={() => handleLanguageSelect(option.value, option.confirmationKey)}
-            >
-              <View style={styles.settingIcon}>
-                <Ionicons name="language" size={24} color="#26C6DA" />
-              </View>
-              <View style={styles.settingInfo}>
-                <Text style={styles.settingName}>{option.label}</Text>
-                <Text style={styles.settingDescription}>{option.nativeLabel}</Text>
-              </View>
-              {language === option.value ? (
-                <Ionicons name="checkmark-circle" size={24} color="#26C6DA" />
-              ) : (
-                <Ionicons name="ellipse-outline" size={24} color="#767577" />
-              )}
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <View style={styles.section}>
           <Text style={styles.sectionTitle}>Accessibility</Text>
+
+          <View style={styles.settingCard}>
+            <View style={styles.settingIcon}>
+              <Ionicons name="language" size={24} color="#4CAF50" />
+            </View>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingName}>Language</Text>
+              <Text style={styles.settingDescription}>English / हिन्दी / ગુજરાતી</Text>
+            </View>
+          </View>
+
+          <View style={styles.languageRow}>
+            <TouchableOpacity
+              style={[styles.languagePill, language === "en" && styles.languagePillActive]}
+              onPress={() => updateLanguage("en")}
+            >
+              <Text style={[styles.languagePillText, language === "en" && styles.languagePillTextActive]}>EN</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.languagePill, language === "hi" && styles.languagePillActive]}
+              onPress={() => updateLanguage("hi")}
+            >
+              <Text style={[styles.languagePillText, language === "hi" && styles.languagePillTextActive]}>हिं</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.languagePill, language === "gu" && styles.languagePillActive]}
+              onPress={() => updateLanguage("gu")}
+            >
+              <Text style={[styles.languagePillText, language === "gu" && styles.languagePillTextActive]}>ગુ</Text>
+            </TouchableOpacity>
+          </View>
 
           <TouchableOpacity
             style={styles.settingCard}
-            onPress={() => handleVoiceCommandToggle()}
-            onLongPress={() => speakDescription("SETTINGS_VOICE_COMMANDS_DESC")}
+            onPress={handleVoiceCommandsToggle}
+            onLongPress={() =>
+              speakDescription(
+                "Toggle voice commands. When enabled, wake phrase based voice control stays active."
+              )
+            }
           >
             <View style={styles.settingIcon}>
-              <Ionicons
-                name={voiceCommandsEnabled ? "mic" : "mic-off"}
-                size={24}
-                color={voiceCommandsEnabled ? "#26C6DA" : "#767577"}
-              />
+              <Ionicons name="mic" size={24} color="#9C27B0" />
             </View>
             <View style={styles.settingInfo}>
               <Text style={styles.settingName}>Voice Commands</Text>
-              <Text style={styles.settingDescription}>
-                {voiceCommandsEnabled
-                  ? "Wake phrase listening enabled"
-                  : "Wake phrase listening disabled"}
-              </Text>
+              <Text style={styles.settingDescription}>Wake phrase voice control</Text>
             </View>
             <Switch
               value={voiceCommandsEnabled}
-              onValueChange={handleVoiceCommandToggle}
-              trackColor={{ false: "#767577", true: "#26C6DA" }}
+              onValueChange={handleVoiceCommandsToggle}
+              trackColor={{ false: "#767577", true: "#9C27B0" }}
               thumbColor={voiceCommandsEnabled ? "#fff" : "#f4f3f4"}
             />
           </TouchableOpacity>
@@ -185,11 +189,15 @@ export default function Settings() {
               if (!hapticEnabled) {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               }
-              speakMessageKey(
-                hapticEnabled ? "HAPTIC_FEEDBACK_DISABLED" : "HAPTIC_FEEDBACK_ENABLED"
+              Speech.speak(
+                hapticEnabled ? "Haptic feedback disabled" : "Haptic feedback enabled"
               );
             }}
-            onLongPress={() => speakDescription("SETTINGS_HAPTIC_DESC")}
+            onLongPress={() =>
+              speakDescription(
+                "Toggle haptic feedback. Provides vibration alerts for actions and warnings."
+              )
+            }
           >
             <View style={styles.settingIcon}>
               <Ionicons name="hand-left" size={24} color="#2196F3" />
@@ -214,7 +222,9 @@ export default function Settings() {
           <TouchableOpacity
             style={styles.settingCard}
             onPress={testVoice}
-            onLongPress={() => speakDescription("SETTINGS_VOICE_TEST_DESC")}
+            onLongPress={() =>
+              speakDescription("Test voice output. Press to hear a sample message.")
+            }
           >
             <View style={styles.settingIcon}>
               <Ionicons name="volume-high" size={24} color="#FF9800" />
@@ -275,7 +285,11 @@ export default function Settings() {
         <View style={styles.section}>
           <TouchableOpacity
             style={styles.helpButton}
-            onPress={() => speakMessageKey("SETTINGS_HELP_DESCRIPTION")}
+            onPress={() =>
+              Speech.speak(
+                "Eye Guide is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation."
+              )
+            }
           >
             <Ionicons name="help-circle" size={24} color="#2196F3" />
             <Text style={styles.helpText}>How to use Eye Guide</Text>
@@ -347,6 +361,32 @@ const styles = StyleSheet.create({
   settingDescription: {
     fontSize: 14,
     color: "#B0B0B0",
+  },
+  languageRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 12,
+  },
+  languagePill: {
+    flex: 1,
+    backgroundColor: "#2A2A2A",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#3A3A3A",
+  },
+  languagePillActive: {
+    backgroundColor: "#4CAF50",
+    borderColor: "#4CAF50",
+  },
+  languagePillText: {
+    color: "#E0E0E0",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  languagePillTextActive: {
+    color: "#ffffff",
   },
   infoCard: {
     backgroundColor: "#1E1E1E",

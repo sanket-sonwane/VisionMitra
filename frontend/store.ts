@@ -18,6 +18,23 @@ interface EmergencyContact {
   priority: number;
 }
 
+const DEFAULT_EMERGENCY_CONTACTS: EmergencyContact[] = [
+  {
+    id: "preset_police",
+    name: "Police",
+    phone: "100",
+    relationship: "Police",
+    priority: 1,
+  },
+  {
+    id: "preset_ambulance",
+    name: "Ambulance",
+    phone: "108",
+    relationship: "Ambulance",
+    priority: 2,
+  },
+];
+
 const isValidEmergencyContact = (value: unknown): value is EmergencyContact => {
   if (!value || typeof value !== "object") return false;
 
@@ -37,6 +54,20 @@ const persistEmergencyContacts = (contacts: EmergencyContact[]) => {
       console.warn("[STORE] Failed to persist emergency contacts:", error);
     }
   );
+};
+
+const ensureDefaultEmergencyContacts = (contacts: EmergencyContact[]): EmergencyContact[] => {
+  const byId = new Set(contacts.map((contact) => contact.id));
+  const byPhone = new Set(contacts.map((contact) => contact.phone));
+
+  const merged = [...contacts];
+
+  for (const defaultContact of DEFAULT_EMERGENCY_CONTACTS) {
+    if (byId.has(defaultContact.id) || byPhone.has(defaultContact.phone)) continue;
+    merged.push(defaultContact);
+  }
+
+  return merged.sort((a, b) => (a.priority || 999) - (b.priority || 999));
 };
 
 interface NavigationSession {
@@ -92,7 +123,7 @@ export const useStore = create<Store>((set) => ({
   },
   currentSession: null,
   setCurrentSession: (session) => set({ currentSession: session }),
-  emergencyContacts: [],
+  emergencyContacts: DEFAULT_EMERGENCY_CONTACTS,
   setEmergencyContacts: (contacts) => {
     set({ emergencyContacts: contacts });
     persistEmergencyContacts(contacts);
@@ -105,7 +136,9 @@ export const useStore = create<Store>((set) => ({
     }),
   removeEmergencyContact: (id) =>
     set((state) => {
-      const updatedContacts = state.emergencyContacts.filter((c) => c.id !== id);
+      const updatedContacts = ensureDefaultEmergencyContacts(
+        state.emergencyContacts.filter((c) => c.id !== id)
+      );
       persistEmergencyContacts(updatedContacts);
       return { emergencyContacts: updatedContacts };
     }),
@@ -125,13 +158,23 @@ const hydrateLanguage = async () => {
 const hydrateEmergencyContacts = async () => {
   try {
     const savedContacts = await AsyncStorage.getItem(EMERGENCY_CONTACTS_STORAGE_KEY);
-    if (!savedContacts) return;
+    if (!savedContacts) {
+      persistEmergencyContacts(DEFAULT_EMERGENCY_CONTACTS);
+      useStore.setState({ emergencyContacts: DEFAULT_EMERGENCY_CONTACTS });
+      return;
+    }
 
     const parsedContacts: unknown = JSON.parse(savedContacts);
-    if (!Array.isArray(parsedContacts)) return;
+    if (!Array.isArray(parsedContacts)) {
+      persistEmergencyContacts(DEFAULT_EMERGENCY_CONTACTS);
+      useStore.setState({ emergencyContacts: DEFAULT_EMERGENCY_CONTACTS });
+      return;
+    }
 
     const validContacts = parsedContacts.filter(isValidEmergencyContact);
-    useStore.setState({ emergencyContacts: validContacts });
+    const hydratedContacts = ensureDefaultEmergencyContacts(validContacts);
+    useStore.setState({ emergencyContacts: hydratedContacts });
+    persistEmergencyContacts(hydratedContacts);
   } catch (error) {
     console.warn("[STORE] Failed to load saved emergency contacts:", error);
   }

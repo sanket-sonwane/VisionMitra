@@ -1,28 +1,31 @@
-import { StyleSheet, View, TouchableOpacity, Text, Image, Platform } from "react-native";
+import { StyleSheet, View, TouchableOpacity, Text } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useEffect } from "react";
-import { speakLocalizedMessage } from "@/localization/speech";
-import type { MessageKey } from "@/localization/messages";
+import * as Speech from "expo-speech";
 
 export default function Index() {
   const router = useRouter();
 
   useEffect(() => {
     // Welcome message on load
-    speakLocalizedMessage("HOME_WELCOME", { rate: 1.0 });
+    Speech.speak("Welcome to VisionMitra. Your AI powered navigation assistant for safe mobility.", {
+      language: "en",
+      pitch: 1.0,
+      rate: 1.0
+    });
   }, []);
 
-  const handlePress = (route: string, labelKey: MessageKey) => {
+  const handlePress = (route: string, label: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    speakLocalizedMessage(labelKey);
+    Speech.speak(label);
     router.push(route as any);
   };
 
-  const speak = (messageKey: MessageKey) => {
-    speakLocalizedMessage(messageKey, { rate: 0.95 });
+  const speak = (text: string) => {
+    Speech.speak(text, { language: "en", pitch: 1.0, rate: 0.95 });
   };
 
   return (
@@ -36,8 +39,8 @@ export default function Index() {
       <View style={styles.menuContainer}>
         <TouchableOpacity
           style={[styles.menuButton, styles.primaryButton]}
-          onPress={() => handlePress("/camera", "HOME_LIVE_NAV_LABEL")}
-          onLongPress={() => speak("HOME_LIVE_NAV_DESC")}
+          onPress={() => handlePress("/camera", "Live Navigation Camera")}
+          onLongPress={() => speak("Live Navigation Camera. Opens real-time obstacle detection.")}
         >
           <Ionicons name="camera" size={48} color="#fff" />
           <Text style={styles.menuButtonText}>Live Navigation</Text>
@@ -46,8 +49,8 @@ export default function Index() {
 
         <TouchableOpacity
           style={[styles.menuButton, styles.secondaryButton]}
-          onPress={() => handlePress("/navigate", "HOME_NAVIGATE_LABEL")}
-          onLongPress={() => speak("HOME_NAVIGATE_DESC")}
+          onPress={() => handlePress("/navigate", "Navigation")}
+          onLongPress={() => speak("Navigation. Plan route to destination.")}
         >
           <Ionicons name="navigate" size={48} color="#fff" />
           <Text style={styles.menuButtonText}>Navigate</Text>
@@ -56,8 +59,8 @@ export default function Index() {
 
         <TouchableOpacity
           style={[styles.menuButton, styles.emergencyButton]}
-          onPress={() => handlePress("/emergency", "HOME_EMERGENCY_LABEL")}
-          onLongPress={() => speak("HOME_EMERGENCY_DESC")}
+          onPress={() => handlePress("/emergency", "Emergency SOS")}
+          onLongPress={() => speak("Emergency SOS. Quick access to emergency contacts.")}
         >
           <Ionicons name="alert-circle" size={48} color="#fff" />
           <Text style={styles.menuButtonText}>Emergency</Text>
@@ -66,8 +69,8 @@ export default function Index() {
 
         <TouchableOpacity
           style={[styles.menuButton, styles.settingsButton]}
-          onPress={() => handlePress("/settings", "HOME_SETTINGS_LABEL")}
-          onLongPress={() => speak("HOME_SETTINGS_DESC")}
+          onPress={() => handlePress("/settings", "Settings")}
+          onLongPress={() => speak("Settings. Configure app preferences and profile.")}
         >
           <Ionicons name="settings" size={48} color="#fff" />
           <Text style={styles.menuButtonText}>Settings</Text>

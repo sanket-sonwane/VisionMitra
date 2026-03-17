@@ -36,6 +36,8 @@ import { decodeBase64ToPixels } from "@/utils/imageUtils";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const SEGMENT_COMPLETION_THRESHOLD = 50; // meters - consider segment complete when within this distance
+const CONTINUOUS_TARGET_INTERVAL_MS = 350;
+const CONTINUOUS_MIN_INTERVAL_MS = 140;
 
 export default function Camera() {
   const router = useRouter();
@@ -52,6 +54,7 @@ export default function Camera() {
   const cameraRef = useRef<any>(null);
   const analysisInterval = useRef<any>(null);
   const isContinuousRef = useRef(false);
+  const consecutiveAnalysisFailures = useRef(0);
   const locationInterval = useRef<any>(null);
   const headingSubscription = useRef<any>(null);
   const lastDirectionAnnounce = useRef<number>(0);
@@ -102,10 +105,17 @@ export default function Camera() {
     requestLocationPermission();
     initializeNavigation();
     // Preload the on-device YOLO model so first detection is fast
-    initDetectionService().then(({ modelLoaded, error }) => {
-      setModelStatus(modelLoaded ? "ready" : "scene-only");
-      if (!modelLoaded) console.warn("[CAMERA] ONNX model not loaded, using scene analysis:", error);
-    });
+    initDetectionService()
+      .then(({ modelLoaded, error }) => {
+        setModelStatus(modelLoaded ? "ready" : "scene-only");
+        if (!modelLoaded) {
+          console.warn("[CAMERA] ONNX model not loaded, using scene analysis:", error);
+        }
+      })
+      .catch((error) => {
+        console.warn("[CAMERA] Detection service init failed, using scene analysis only:", error);
+        setModelStatus("scene-only");
+      });
     
     return () => {
       if (analysisInterval.current) {
@@ -366,6 +376,8 @@ export default function Camera() {
   const captureAndAnalyze = async () => {
     if (!cameraRef.current || isAnalyzing) return;
 
+    const shouldLogPerf = __DEV__ && showDebugInfo;
+
     const totalStart = Date.now();
     try {
       setIsAnalyzing(true);
@@ -378,13 +390,15 @@ export default function Camera() {
       // Capture a smaller frame with enough detail for YOLO.
       const captureStart = Date.now();
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.4,
+        quality: 0.3,
         base64: true,
         skipProcessing: true,
         exif: false,
       });
       const captureTime = Date.now() - captureStart;
-      console.log(`[CAMERA] takePictureAsync: ${captureTime}ms`);
+      if (shouldLogPerf) {
+        console.log(`[CAMERA] takePictureAsync: ${captureTime}ms`);
+      }
 
       if (!photo.base64) {
         throw new Error("Failed to capture image");
@@ -406,7 +420,9 @@ export default function Camera() {
             [{ resize: { width: 320 } }],
             { format: ImageManipulator.SaveFormat.JPEG, base64: true, compress: 0.7 }
           );
-          console.log(`[CAMERA] ImageManipulator resize: ${Date.now() - resizeStart}ms`);
+          if (shouldLogPerf) {
+            console.log(`[CAMERA] ImageManipulator resize: ${Date.now() - resizeStart}ms`);
+          }
           if (resized.base64) {
             imageBase64 = resized.base64;
           }
@@ -417,108 +433,52 @@ export default function Camera() {
 
       let result: any = null;
 
-      // Strategy: Try on-device first. If ONNX unavailable, use server for YOLO.
-      // Scene analysis always runs locally.
-      if (modelStatus === "ready") {
-        // ====== FULL ON-DEVICE DETECTION (ONNX available) ======
-        const decodeStart = Date.now();
-        const decoded = await decodeBase64ToPixels(imageBase64);
+      // Production mode: always run detection locally.
+      // If ONNX is unavailable on a device, scene-analysis fallback still runs on-device.
+      const decodeStart = Date.now();
+      const decoded = await decodeBase64ToPixels(imageBase64);
+      if (shouldLogPerf) {
         console.log(`[CAMERA] decodeBase64ToPixels: ${Date.now() - decodeStart}ms`);
-        if (decoded) {
-          const sessionId = currentSession?.id || "default";
-          const localResult = await detectObstaclesLocal(
-            decoded.pixels, decoded.width, decoded.height, sessionId
-          );
-          result = {
-            obstacles: localResult.obstacles,
-            safe_direction: localResult.safeDirection,
-            warning_level: localResult.riskLevel,
-            audio_message_key: localResult.audioMessage || undefined,
-            audio_message: localResult.audioMessage
-              ? translate(localResult.audioMessage)
-              : "",
-            detection_coords: localResult.detectionCoords,
-            debug_info: showDebugInfo ? {
-              mode: "on-device",
-              model_loaded: localResult.modelLoaded,
-              timings: localResult.timings,
-              calibration_state: localResult.calibrationState,
-              alert_priority: localResult.alertPriority,
-              lane_counters: localResult.laneCounters,
-              corridor_analysis_ms: localResult.corridorAnalysisMs,
-              corridor_overlay: __DEV__ ? localResult.corridorDebugOverlay : null,
-              frame_width: decoded.width,
-              frame_height: decoded.height,
-              scene_reason: localResult.sceneAnalysis.reason,
-              scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
-              scene_metrics: localResult.sceneAnalysis.metrics,
-              raw_detections_count: localResult.rawDetections.length,
-              tracked_objects_count: localResult.trackedObjects.length,
-              obstacles_count: localResult.obstacles.length,
-              frame_index: localResult.frameIndex,
-            } : null,
-          };
-        }
-      } else {
-        // ====== HYBRID: Server YOLO + Local Scene Analysis ======
-        // Send frame to backend for YOLO detection (use resized image for faster upload)
-        try {
-          const serverResponse = await axios.post(
-            `${BACKEND_URL}/api/detect-obstacles`,
-            {
-              image_base64: imageBase64,
-              user_id: userId || "anonymous",
-              session_id: currentSession?.id || "default",
-            },
-            { timeout: 5000 }
-          );
-          result = serverResponse.data;
-          if (showDebugInfo) {
-            result.debug_info = { ...result.debug_info, mode: "server" };
-          }
-        } catch (serverErr: any) {
-          // Server unreachable — fall back to local scene analysis only
-          console.warn("[CAMERA] Server unreachable, using scene-only:", serverErr.message);
-          const decoded = await decodeBase64ToPixels(imageBase64);
-          if (decoded) {
-            const sessionId = currentSession?.id || "default";
-            const localResult = await detectObstaclesLocal(
-              decoded.pixels, decoded.width, decoded.height, sessionId
-            );
-            result = {
-              obstacles: localResult.obstacles,
-              safe_direction: localResult.safeDirection,
-              warning_level: localResult.riskLevel,
-              audio_message_key: localResult.audioMessage || undefined,
-              audio_message: localResult.audioMessage
-                ? translate(localResult.audioMessage)
-                : "",
-              detection_coords: localResult.detectionCoords,
-              debug_info: showDebugInfo ? {
-                mode: "scene-only",
-                model_loaded: localResult.modelLoaded,
-                timings: localResult.timings,
-                calibration_state: localResult.calibrationState,
-                alert_priority: localResult.alertPriority,
-                lane_counters: localResult.laneCounters,
-                corridor_analysis_ms: localResult.corridorAnalysisMs,
-                corridor_overlay: __DEV__ ? localResult.corridorDebugOverlay : null,
-                frame_width: decoded.width,
-                frame_height: decoded.height,
-                scene_reason: localResult.sceneAnalysis.reason,
-                scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
-                scene_metrics: localResult.sceneAnalysis.metrics,
-                raw_detections_count: localResult.rawDetections.length,
-                tracked_objects_count: localResult.trackedObjects.length,
-                obstacles_count: localResult.obstacles.length,
-                frame_index: localResult.frameIndex,
-              } : null,
-            };
-          }
-        }
+      }
+      if (decoded) {
+        const sessionId = currentSession?.id || "default";
+        const localResult = await detectObstaclesLocal(
+          decoded.pixels, decoded.width, decoded.height, sessionId
+        );
+        const mode = localResult.modelLoaded ? "on-device" : "scene-only";
+        result = {
+          obstacles: localResult.obstacles,
+          safe_direction: localResult.safeDirection,
+          warning_level: localResult.riskLevel,
+          audio_message_key: localResult.audioMessage || undefined,
+          audio_message: localResult.audioMessage
+            ? translate(localResult.audioMessage)
+            : "",
+          detection_coords: localResult.detectionCoords,
+          debug_info: showDebugInfo ? {
+            mode,
+            model_loaded: localResult.modelLoaded,
+            timings: localResult.timings,
+            calibration_state: localResult.calibrationState,
+            alert_priority: localResult.alertPriority,
+            lane_counters: localResult.laneCounters,
+            corridor_analysis_ms: localResult.corridorAnalysisMs,
+            corridor_overlay: __DEV__ ? localResult.corridorDebugOverlay : null,
+            frame_width: decoded.width,
+            frame_height: decoded.height,
+            scene_reason: localResult.sceneAnalysis.reason,
+            scene_confidence: localResult.sceneAnalysis.obstructionConfidence,
+            scene_metrics: localResult.sceneAnalysis.metrics,
+            raw_detections_count: localResult.rawDetections.length,
+            tracked_objects_count: localResult.trackedObjects.length,
+            obstacles_count: localResult.obstacles.length,
+            frame_index: localResult.frameIndex,
+          } : null,
+        };
       }
 
       if (result) {
+        consecutiveAnalysisFailures.current = 0;
         const rawAlertValue =
           typeof result.audio_message_key === "string" && result.audio_message_key.length > 0
             ? result.audio_message_key
@@ -574,7 +534,9 @@ export default function Camera() {
         }
         
         // Log total time
-        console.log(`[CAMERA] Total captureAndAnalyze: ${Date.now() - totalStart}ms`);
+        if (shouldLogPerf) {
+          console.log(`[CAMERA] Total captureAndAnalyze: ${Date.now() - totalStart}ms`);
+        }
       } else {
         if (!isContinuousRef.current) {
           speakMessageKey("ANALYSIS_UNAVAILABLE");
@@ -587,9 +549,17 @@ export default function Camera() {
       }
 
     } catch (error: any) {
+      consecutiveAnalysisFailures.current += 1;
       console.error("Analysis error:", error);
       speakMessageKey("ANALYSIS_FAILED");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+
+      // Circuit breaker: avoid repeated crash loops on low-memory/low-end devices.
+      if (isContinuousRef.current && consecutiveAnalysisFailures.current >= 3) {
+        isContinuousRef.current = false;
+        setIsActive(false);
+        speakText("Continuous monitoring paused for stability. Please restart analysis.");
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -676,15 +646,16 @@ export default function Camera() {
         frameCount++;
         const frameTime = Date.now() - frameStart;
         
-        // Log FPS every 5 frames
-        if (frameCount % 5 === 0) {
+        // Keep debug logs sparse so Metro/IDE isn't overwhelmed in continuous mode.
+        if (__DEV__ && showDebugInfo && frameCount % 20 === 0) {
           const elapsed = (Date.now() - loopStartTime) / 1000;
           const fps = frameCount / elapsed;
           console.log(`[CONTINUOUS] Frame ${frameCount}: ${frameTime}ms, Avg FPS: ${fps.toFixed(2)}`);
         }
 
-        // Minimal gap - just yield to allow UI updates
-        await new Promise(r => setTimeout(r, 50));
+        // Adaptive backoff for lower-end devices: avoid runaway CPU/memory pressure.
+        const waitMs = Math.max(CONTINUOUS_MIN_INTERVAL_MS, CONTINUOUS_TARGET_INTERVAL_MS - frameTime);
+        await new Promise((r) => setTimeout(r, waitMs));
       }
     };
     runLoop();
@@ -729,7 +700,7 @@ export default function Camera() {
         <View style={styles.modeIndicator}>
           <View style={[styles.modeDot, { backgroundColor: modelStatus === "ready" ? "#4CAF50" : modelStatus === "scene-only" ? "#2196F3" : "#FF9800" }]} />
           <Text style={styles.modeText}>
-            {modelStatus === "ready" ? "AI On-Device" : modelStatus === "scene-only" ? "Server + Scene" : "Loading..."}
+            {modelStatus === "ready" ? "AI On-Device" : modelStatus === "scene-only" ? "Scene Only (Offline)" : "Loading..."}
           </Text>
         </View>
       </View>
