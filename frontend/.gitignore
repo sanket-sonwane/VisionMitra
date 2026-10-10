@@ -2,6 +2,8 @@
 
 # dependencies
 node_modules/
+# yarn is the package manager; ignore npm lockfiles if they appear
+package-lock.json
 
 # Expo
 .expo/
@@ -19,6 +21,7 @@ expo-env.d.ts
 *.mobileprovision
 
 # Metro
+.metro-cache/
 .metro-health-check*
 
 # debug
@@ -31,7 +34,9 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+!.env.example
 
 # typescript
 *.tsbuildinfo

@@ -1,15 +1,5 @@
-import { create } from 'zustand';
-
-interface NavigationSession {
-  id: string;
-  user_id: string;
-  start_location: any;
-  destination?: any;
-  destination_name?: string;
-  status: string;
-  mode: string;
-  started_at: string;
-}
+import { create } from "zustand";
+import type { NavigationSession } from "@/utils/types";
 
 interface Store {
   userId: string | null;

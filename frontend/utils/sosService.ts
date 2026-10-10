@@ -1,6 +1,6 @@
 import { Linking, NativeModules, Platform } from "react-native";
 import * as Location from "expo-location";
-import axios from "axios";
+import { apiRequest } from "./api";
 
 export interface EmergencyContact {
   id: string;
@@ -30,7 +30,6 @@ interface NotifyResult {
 export interface TriggerEmergencyParams {
   contacts: EmergencyContact[];
   userId: string;
-  backendUrl?: string;
   modePreference?: SmsMode;
   locationTimeoutMs?: number;
   batteryPercent?: number;
@@ -272,9 +271,11 @@ export async function triggerEmergencyFlow(
   let backendLogged = false;
   let backendError: string | undefined;
 
-  if (params.backendUrl) {
-    try {
-      await axios.post(`${params.backendUrl}/api/emergency-alert`, {
+  try {
+    await apiRequest({
+      method: "post",
+      path: "/emergency-alert",
+      data: {
         user_id: params.userId,
         latitude: location.latitude,
         longitude: location.longitude,
@@ -283,12 +284,12 @@ export async function triggerEmergencyFlow(
         contacts_attempted: notify.contactsAttempted,
         contacts_notified: notify.contactsNotified,
         notify_errors: notify.notifyErrors,
-      });
-      backendLogged = true;
-    } catch (error: any) {
-      backendLogged = false;
-      backendError = error?.message || "Failed to log emergency alert";
-    }
+      },
+    });
+    backendLogged = true;
+  } catch (error) {
+    backendLogged = false;
+    backendError = error instanceof Error ? error.message : "Failed to log emergency alert";
   }
 
   return {

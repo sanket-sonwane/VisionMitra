@@ -12,7 +12,7 @@ import Constants from "expo-constants";
 export default function Settings() {
   const router = useRouter();
   const { isOnlineMode, toggleMode, userId } = useStore();
-  const [speechRate, setSpeechRate] = useState(0.9);
+  const speechRate = 0.9;
   const [hapticEnabled, setHapticEnabled] = useState(true);
 
   useEffect(() => {
@@ -200,12 +200,12 @@ export default function Settings() {
             style={styles.helpButton}
             onPress={() =>
               Speech.speak(
-                "Eye Guide is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation."
+                "VisionMitra is an AI-powered navigation assistant for visually impaired users. It provides real-time obstacle detection, voice guidance, emergency SOS, and helps find nearby transport stops. Use online mode for accurate AI detection or offline mode for basic navigation."
               )
             }
           >
             <Ionicons name="help-circle" size={24} color="#2196F3" />
-            <Text style={styles.helpText}>How to use Eye Guide</Text>
+            <Text style={styles.helpText}>How to use VisionMitra</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>

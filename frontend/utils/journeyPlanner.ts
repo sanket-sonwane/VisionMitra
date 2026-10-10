@@ -7,7 +7,7 @@
  * - Segmented navigation planning
  */
 
-import axios from "axios";
+import axios, { isAxiosError } from "axios";
 
 // ==================== TYPES & INTERFACES ====================
 
@@ -160,7 +160,7 @@ async function postOverpass(query: string): Promise<any | null> {
         return response.data;
       } catch (error) {
         lastError = error;
-        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        const status = isAxiosError(error) ? error.response?.status : undefined;
         const retryable = isRetryableOverpassStatus(status);
 
         console.warn(
@@ -177,7 +177,7 @@ async function postOverpass(query: string): Promise<any | null> {
     }
   }
 
-  if (axios.isAxiosError(lastError)) {
+  if (isAxiosError(lastError)) {
     const status = lastError.response?.status;
     console.warn(`[JourneyPlanner] Overpass unavailable after retries (status=${status || "n/a"})`);
   } else if (lastError) {
@@ -292,7 +292,7 @@ export async function fetchNearbyStops(
     console.log(`[JourneyPlanner] Found ${limitedStops.length} stops`);
     return limitedStops;
   } catch (error) {
-    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    const status = isAxiosError(error) ? error.response?.status : undefined;
     console.warn(`[JourneyPlanner] Overpass fetch failed (status=${status || "n/a"})`);
     return [];
   }

@@ -9,27 +9,44 @@ import { useRouter } from "expo-router";
 import { requireOptionalNativeModule } from "expo-modules-core";
 import axios from "axios";
 import { useStore } from "@/store";
+import { apiRequest } from "@/utils/api";
+import type { NavigationSession } from "@/utils/types";
 import {
   planJourney,
   calculateDistance,
+  estimateTravelTime,
   formatDistance,
   formatTime,
   generateAudioInstruction,
   clearStopCache,
   type JourneyPlan,
-  type NavigationSegment,
   type Coordinates,
 } from "@/utils/journeyPlanner";
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+type SpeechRecognitionResultEvent = {
+  results?: { transcript?: string }[];
+  isFinal?: boolean;
+};
+
+type SpeechRecognitionErrorEvent = {
+  error?: string;
+  message?: string;
+};
+
+type SpeechRecognitionStartOptions = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  contextualStrings: string[];
+};
 
 type SpeechRecognitionModuleLike = {
   isRecognitionAvailable: () => boolean;
   requestPermissionsAsync: () => Promise<{ granted: boolean }>;
-  start: (options: Record<string, any>) => void;
+  start: (options: SpeechRecognitionStartOptions) => void;
   stop: () => void;
   abort: () => void;
-  addListener?: (eventName: string, listener: (event: any) => void) => { remove: () => void };
+  addListener?: <T>(eventName: string, listener: (event: T) => void) => { remove: () => void };
 };
 
 function loadSpeechRecognitionModule(): SpeechRecognitionModuleLike | null {
@@ -46,7 +63,6 @@ export default function Navigate() {
   const router = useRouter();
   const [destinationQuery, setDestinationQuery] = useState("");
   const [destinationCoords, setDestinationCoords] = useState<Coordinates | null>(null);
-  const [nearbyStops, setNearbyStops] = useState<any[]>([]);
   const [currentLocation, setCurrentLocation] = useState<Coordinates | null>(null);
   const [isNavigating, setIsNavigating] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -85,20 +101,26 @@ export default function Navigate() {
       setIsListeningDestination(false);
     });
 
-    const resultSub = speechRecognitionModule.addListener?.("result", (event: any) => {
-      const transcript = event?.results?.[0]?.transcript?.trim();
-      if (!transcript) return;
-      setDestinationQuery(transcript);
-      if (event?.isFinal) {
-        Speech.speak(`Destination set to ${transcript}`);
+    const resultSub = speechRecognitionModule.addListener?.<SpeechRecognitionResultEvent>(
+      "result",
+      (event) => {
+        const transcript = event?.results?.[0]?.transcript?.trim();
+        if (!transcript) return;
+        setDestinationQuery(transcript);
+        if (event?.isFinal) {
+          Speech.speak(`Destination set to ${transcript}`);
+        }
       }
-    });
+    );
 
-    const errorSub = speechRecognitionModule.addListener?.("error", (event: any) => {
-      setIsListeningDestination(false);
-      console.warn("Destination voice input error:", event?.error, event?.message);
-      Speech.speak("Voice input failed. Please try again.");
-    });
+    const errorSub = speechRecognitionModule.addListener?.<SpeechRecognitionErrorEvent>(
+      "error",
+      (event) => {
+        setIsListeningDestination(false);
+        console.warn("Destination voice input error:", event?.error, event?.message);
+        Speech.speak("Voice input failed. Please try again.");
+      }
+    );
 
     return () => {
       try {
@@ -172,7 +194,7 @@ export default function Navigate() {
           addressdetails: 1,
         },
         headers: {
-          "User-Agent": "EyeGuide-Navigation-App/1.0",
+          "User-Agent": "VisionMitra-Navigation-App/1.0",
         },
         timeout: 10000,
       });
@@ -319,17 +341,21 @@ export default function Navigate() {
       setIsNavigating(true);
 
       // Create navigation session with journey plan
-      const response = await axios.post(`${BACKEND_URL}/api/navigation-sessions`, {
-        user_id: userId || "demo_user",
-        start_location: currentLocation,
-        destination: destinationCoords,
-        destination_name: destinationQuery,
-        mode: isOnlineMode ? "online" : "offline",
-        journey_plan: journeyPlan, // Include full journey plan
-        current_segment_index: 0,
+      const session = await apiRequest<NavigationSession>({
+        method: "post",
+        path: "/navigation-sessions",
+        data: {
+          user_id: userId || "demo_user",
+          start_location: currentLocation,
+          destination: destinationCoords,
+          destination_name: destinationQuery,
+          mode: isOnlineMode ? "online" : "offline",
+          journey_plan: journeyPlan, // Include full journey plan
+          current_segment_index: 0,
+        },
       });
 
-      setCurrentSession(response.data);
+      setCurrentSession(session);
       Speech.speak(`Navigation started. ${generateAudioInstruction(journeyPlan.segments[0])}`);
       
       // Open camera for live navigation
@@ -508,12 +534,6 @@ export default function Navigate() {
       )}
     </SafeAreaView>
   );
-}
-
-// Helper function inline for time estimation
-function estimateTravelTime(distance: number, type: "WALK" | "TRANSPORT"): number {
-  const speed = type === "WALK" ? 1.4 : 8.3; // m/s
-  return Math.round(distance / speed / 60); // minutes
 }
 
 const styles = StyleSheet.create({

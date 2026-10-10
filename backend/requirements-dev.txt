@@ -1,0 +1,9 @@
+# VisionMitra backend — development and test tooling.
+#
+# Install with:  pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+ruff>=0.6
+pytest>=8,<10
+requests>=2.31,<3

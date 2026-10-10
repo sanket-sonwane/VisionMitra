@@ -18,6 +18,9 @@ node_modules/
 
 # Testing
 /coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Next.js
 /.next/
@@ -31,7 +34,12 @@ dist/
 dist
 
 # Environment files (comprehensive coverage)
-
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
 *token.json*
 *credentials.json*
 
@@ -75,6 +83,7 @@ agenthub/agents/youtube/db
 
 # Build caches
 .cache/
+.metro-cache/
 
 # Mobile development
 android-sdk/ 

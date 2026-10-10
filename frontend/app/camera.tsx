@@ -1,5 +1,5 @@
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Platform } from "react-native";
-import { CameraView, useCameraPermissions, CameraType } from "expo-camera";
+import { StyleSheet, View, TouchableOpacity, Text } from "react-native";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { useState, useEffect, useRef } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -7,8 +7,9 @@ import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
-import axios from "axios";
 import { useStore } from "@/store";
+import { apiRequest } from "@/utils/api";
+import type { ObstacleDetectionResult } from "@/utils/types";
 import {
   calculateDistance,
   formatDistance,
@@ -17,7 +18,6 @@ import {
   type Coordinates,
 } from "@/utils/journeyPlanner";
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const SEGMENT_COMPLETION_THRESHOLD = 50; // meters - consider segment complete when within this distance
 
 export default function Camera() {
@@ -25,20 +25,19 @@ export default function Camera() {
   const [permission, requestPermission] = useCameraPermissions();
   const [locationPermission, setLocationPermission] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [lastAnalysis, setLastAnalysis] = useState<any>(null);
+  const [lastAnalysis, setLastAnalysis] = useState<ObstacleDetectionResult | null>(null);
   const [isActive, setIsActive] = useState(false);
-  const [currentLocation, setCurrentLocation] = useState<Coordinates | null>(null);
   const [currentSegment, setCurrentSegment] = useState<NavigationSegment | null>(null);
   const [segmentProgress, setSegmentProgress] = useState<number>(0);
-  const cameraRef = useRef<any>(null);
-  const analysisInterval = useRef<any>(null);
-  const locationInterval = useRef<any>(null);
+  const cameraRef = useRef<CameraView>(null);
+  const analysisInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const locationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const { userId, isOnlineMode, currentSession, setCurrentSession } = useStore();
 
   useEffect(() => {
     requestLocationPermission();
     initializeNavigation();
-    
+
     return () => {
       if (analysisInterval.current) {
         clearInterval(analysisInterval.current);
@@ -48,6 +47,8 @@ export default function Camera() {
       }
       Speech.stop();
     };
+    // Run once on mount; the helpers are stable for the life of the screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Update current segment when session changes
@@ -55,6 +56,8 @@ export default function Camera() {
     if (currentSession?.journey_plan) {
       updateCurrentSegment();
     }
+    // Only react to session changes; updateCurrentSegment reads the latest session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSession]);
 
   const initializeNavigation = () => {
@@ -93,7 +96,6 @@ export default function Camera() {
           latitude: loc.coords.latitude,
           longitude: loc.coords.longitude,
         };
-        setCurrentLocation(coords);
         checkSegmentCompletion(coords);
       } catch (error) {
         console.error("Location tracking error:", error);
@@ -133,13 +135,11 @@ export default function Camera() {
     if (nextSegmentIndex < totalSegments) {
       // Move to next segment
       try {
-        await axios.patch(
-          `${BACKEND_URL}/api/navigation-sessions/${currentSession.id}`,
-          null,
-          {
-            params: { current_segment_index: nextSegmentIndex },
-          }
-        );
+        await apiRequest({
+          method: "patch",
+          path: `/navigation-sessions/${currentSession.id}`,
+          data: { current_segment_index: nextSegmentIndex },
+        });
 
         // Update local session
         const updatedSession = {
@@ -163,13 +163,11 @@ export default function Camera() {
     if (!currentSession) return;
 
     try {
-      await axios.patch(
-        `${BACKEND_URL}/api/navigation-sessions/${currentSession.id}`,
-        null,
-        {
-          params: { status: "completed" },
-        }
-      );
+      await apiRequest({
+        method: "patch",
+        path: `/navigation-sessions/${currentSession.id}`,
+        data: { status: "completed" },
+      });
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Speech.speak("Navigation complete. You have arrived at your destination.");
@@ -246,17 +244,18 @@ export default function Camera() {
 
       // Send to backend for analysis (only if online mode)
       if (isOnlineMode) {
-        const response = await axios.post(`${BACKEND_URL}/api/detect-obstacles`, {
-          image_base64: photo.base64,
-          user_id: userId || "demo_user",
-          session_id: currentSession?.id,
-          latitude: location?.latitude,
-          longitude: location?.longitude,
-        }, {
-          timeout: 10000
+        const result = await apiRequest<ObstacleDetectionResult>({
+          method: "post",
+          path: "/detect-obstacles",
+          data: {
+            image_base64: photo.base64,
+            user_id: userId || "demo_user",
+            session_id: currentSession?.id,
+            latitude: location?.latitude,
+            longitude: location?.longitude,
+          },
         });
 
-        const result = response.data;
         setLastAnalysis(result);
 
         // Haptic feedback based on warning level
@@ -278,12 +277,14 @@ export default function Camera() {
         // Offline mode - basic analysis
         Speech.speak("Offline mode. Using basic detection. Please proceed with caution.");
         setLastAnalysis({
+          obstacles: [],
+          safe_direction: null,
           warning_level: "caution",
-          audio_message: "Offline mode active. Limited obstacle detection."
+          audio_message: "Offline mode active. Limited obstacle detection.",
         });
       }
 
-    } catch (error: any) {
+    } catch (error) {
       console.error("Analysis error:", error);
       Speech.speak("Analysis failed. Please try again.");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);

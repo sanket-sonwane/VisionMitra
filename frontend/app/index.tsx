@@ -1,5 +1,5 @@
-import { StyleSheet, View, TouchableOpacity, Text, Image, Platform } from "react-native";
-import { useRouter } from "expo-router";
+import { StyleSheet, View, TouchableOpacity, Text } from "react-native";
+import { useRouter, type Href } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
@@ -18,10 +18,10 @@ export default function Index() {
     });
   }, []);
 
-  const handlePress = (route: string, label: string) => {
+  const handlePress = (route: Href, label: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     Speech.speak(label);
-    router.push(route as any);
+    router.push(route);
   };
 
   const speak = (text: string) => {

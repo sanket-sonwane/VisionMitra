@@ -1,50 +1,59 @@
-# Welcome to your Expo app 👋
+# VisionMitra — Frontend
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+The Expo / React Native client for VisionMitra, an accessibility-first AI
+mobility assistant for visually impaired users.
 
-## Get started
+For the full system overview, architecture, and API reference, see the
+[repository README](../README.md) and the [setup guide](../SETUP.md).
 
-1. Install dependencies
+## Requirements
 
-   ```bash
-   npm install
-   ```
+- Node.js 18+
+- Yarn 1.x (this package is yarn-managed; `packageManager` is pinned in
+  `package.json`)
+- Expo Go on a device, or an Android/iOS emulator
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Getting started
 
 ```bash
-npm run reset-project
+yarn install
+yarn start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Then press `a` (Android emulator), `i` (iOS simulator), or scan the QR code with
+Expo Go. The backend URL is read from `EXPO_PUBLIC_BACKEND_URL`; copy
+`.env.example` to `.env` and set it to an address your device can reach
+(`10.0.2.2` for the Android emulator, `127.0.0.1` for the iOS simulator, or your
+LAN IP for a physical device).
 
-## Learn more
+## Scripts
 
-To learn more about developing your project with Expo, look at the following resources:
+| Command | Description |
+| --- | --- |
+| `yarn start` | Start the Expo dev server |
+| `yarn android` / `yarn ios` / `yarn web` | Start for a specific platform |
+| `yarn typecheck` | Run `tsc --noEmit` |
+| `yarn lint` | Run ESLint (`expo lint`) |
+| `yarn reset-project` | Reset to the bare Expo starter (template utility) |
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Structure
 
-## Join the community
+```text
+frontend/
+├── app/                 # Screens (file-based routing via expo-router)
+│   ├── index.tsx        # Home menu
+│   ├── camera.tsx       # Live obstacle detection + segment navigation
+│   ├── navigate.tsx     # Destination entry + journey planning
+│   ├── emergency.tsx    # Emergency contacts + SOS
+│   └── settings.tsx     # Preferences and device info
+├── utils/
+│   ├── api.ts           # Backend base URL + request helper (with fallback)
+│   ├── types.ts         # Shared API payload types
+│   ├── journeyPlanner.ts# Journey planning + Overpass/Nominatim access
+│   └── sosService.ts    # Emergency SMS/location flow
+├── scripts/             # Manual smoke scripts
+└── store.ts             # Global Zustand state
+```
 
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+The backend base URL is resolved centrally in `utils/api.ts`; avoid reading
+`process.env.EXPO_PUBLIC_BACKEND_URL` directly in screens.

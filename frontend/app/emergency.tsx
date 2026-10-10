@@ -5,53 +5,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import { useRouter } from "expo-router";
-import axios from "axios";
 import { useStore } from "@/store";
+import { apiRequest, isNetworkError } from "@/utils/api";
 import { triggerEmergencyFlow, type EmergencyContact, type SmsMode } from "@/utils/sosService";
-
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-const API_TIMEOUT = 10000;
-
-function normalizeBaseUrl(url?: string): string {
-  return (url || "").trim().replace(/\/$/, "");
-}
-
-function getBackendCandidates(): string[] {
-  const configured = normalizeBaseUrl(BACKEND_URL);
-  const fallbacks = [
-    "http://10.0.2.2:8001",
-    "http://127.0.0.1:8001",
-    "http://localhost:8001",
-  ];
-
-  const candidates = [configured, ...fallbacks].filter(Boolean);
-  return Array.from(new Set(candidates));
-}
-
-function isNetworkError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return false;
-  return !error.response;
-}
-
-async function requestWithFallback<T>(
-  executor: (baseUrl: string) => Promise<T>
-): Promise<T> {
-  const candidates = getBackendCandidates();
-  let lastError: unknown;
-
-  for (const baseUrl of candidates) {
-    try {
-      return await executor(baseUrl);
-    } catch (error) {
-      lastError = error;
-      if (!isNetworkError(error)) {
-        throw error;
-      }
-    }
-  }
-
-  throw lastError || new Error("Backend unavailable");
-}
 
 export default function Emergency() {
   const router = useRouter();
@@ -68,17 +24,16 @@ export default function Emergency() {
   useEffect(() => {
     Speech.speak("Emergency contacts. Add contacts for SOS alerts.");
     loadContacts();
+    // Load once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadContacts = async () => {
     try {
-      const response = await requestWithFallback((baseUrl) =>
-        axios.get(
-          `${baseUrl}/api/emergency-contacts/${userId || "demo_user"}`,
-          { timeout: API_TIMEOUT }
-        )
-      );
-      setContacts(response.data);
+      const data = await apiRequest<EmergencyContact[]>({
+        path: `/emergency-contacts/${userId || "demo_user"}`,
+      });
+      setContacts(data);
     } catch (error) {
       console.error("Load contacts error:", error);
       if (isNetworkError(error)) {
@@ -94,19 +49,17 @@ export default function Emergency() {
     }
 
     try {
-      await requestWithFallback((baseUrl) =>
-        axios.post(
-          `${baseUrl}/api/emergency-contacts`,
-          {
-            user_id: userId || "demo_user",
-            name: newContact.name,
-            phone: newContact.phone,
-            relationship: newContact.relationship || "Contact",
-            priority: contacts.length + 1,
-          },
-          { timeout: API_TIMEOUT }
-        )
-      );
+      await apiRequest({
+        method: "post",
+        path: "/emergency-contacts",
+        data: {
+          user_id: userId || "demo_user",
+          name: newContact.name,
+          phone: newContact.phone,
+          relationship: newContact.relationship || "Contact",
+          priority: contacts.length + 1,
+        },
+      });
 
       Speech.speak("Contact added successfully.");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -125,11 +78,10 @@ export default function Emergency() {
 
   const deleteContact = async (contactId: string, name: string) => {
     try {
-      await requestWithFallback((baseUrl) =>
-        axios.delete(`${baseUrl}/api/emergency-contacts/${contactId}`, {
-          timeout: API_TIMEOUT,
-        })
-      );
+      await apiRequest({
+        method: "delete",
+        path: `/emergency-contacts/${contactId}`,
+      });
       Speech.speak(`${name} removed.`);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       loadContacts();
@@ -160,7 +112,6 @@ export default function Emergency() {
       const result = await triggerEmergencyFlow({
         contacts,
         userId: userId || "demo_user",
-        backendUrl: BACKEND_URL,
         modePreference: smsMode,
       });
 
